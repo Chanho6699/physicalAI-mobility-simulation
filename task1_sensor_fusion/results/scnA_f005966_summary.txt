@@ -1,0 +1,33 @@
+================================================================================================
+ RGB-D SENSOR FUSION | Simplified Reachability (no IK / grasp / collision planning)
+ Scenario A | FRAME(step) 5966 | CAM FRAME {'referenceTimeDenominator': 30, 'referenceTimeNumerator': 5982} | SIM TIME 99.47 s | CAM 20 Hz | RGB+Depth source: separate getters (same step)
+------------------------------------------------------------------------------------------------
+Object            Role        Detect   Pixels  ValidZ  Depth(m)  Robot Dist(m)  Range   Note
+------------------------------------------------------------------------------------------------
+RedContainer      TARGET      YES         347     241     2.209          0.221     IN   
+BlueBox           NON_TARGET  YES        1539    1410     1.606          0.795    OUT   
+GreenMetalSphere  NON_TARGET  YES         495     389     1.994          0.586     IN   
+------------------------------------------------------------------------------------------------
+ Coordinates [m]: Cam = ROS optical (x right, y down, z = optical axis = depth) | World = Z-up | Robot = base frame
+  RedContainer      uv=(263,255)   Cam=(-0.23, +0.06, +2.21)  World=(+0.21, +0.07, +0.44)  Robot=(+0.21, +0.07, +0.04)
+  BlueBox           uv=(16,351)    Cam=(-0.89, +0.32, +1.61)  World=(-0.23, -0.76, +0.47)  Robot=(-0.23, -0.76, +0.07)
+  GreenMetalSphere  uv=(345,277)   Cam=(+0.09, +0.13, +1.99)  World=(+0.58, -0.06, +0.47)  Robot=(+0.58, -0.06, +0.07)
+------------------------------------------------------------------------------------------------
+TARGET        : RedContainer (red opaque plastic container (cylinder))
+MAX_REACH     : 0.70 m (simplified workspace radius, NOT a manufacturer spec)
+TARGET DIST   : 0.221 m (robot base -> RGB-D estimated target surface)
+FINAL RESULT  : REACHABLE RANGE
+FRAME         : 5966
+SIM TIME      : 99.47 sec
+------------------------------------------------------------------------------------------------
+[RGB ONLY]    Target detected: YES at (263,255) px | Distance: N/A | Reachability: UNKNOWN
+[DEPTH ONLY]  Nearest depth: 1.553 m at (4,350) px | Identity: UNKNOWN | Target reachability: UNKNOWN
+              naive 'nearest surface = target' -> robot dist 0.836 m -> OUT OF RANGE   (that surface actually belongs to: BlueBox, known only via RGB)
+[FUSION]      Target: RedContainer | Target robot distance: 0.221 m | Reachability: REACHABLE RANGE
+              naive depth-only vs fusion: DISAGREE -> single-sensor decision would be WRONG
+------------------------------------------------------------------------------------------------
+ [VALIDATION ONLY - ground-truth object centers from stage, NOT used in any decision]
+  RedContainer      GT center dist 0.223 m | sensor est 0.221 m | diff -0.003 m (surface vs center) | unproj check 0.0000 m
+  BlueBox           GT center dist 0.800 m | sensor est 0.795 m | diff -0.004 m (surface vs center) | unproj check 0.0000 m
+  GreenMetalSphere  GT center dist 0.574 m | sensor est 0.586 m | diff 0.012 m (surface vs center) | unproj check 0.0000 m
+================================================================================================
