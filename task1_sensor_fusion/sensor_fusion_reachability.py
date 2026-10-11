@@ -2,42 +2,42 @@
 """
 sensor_fusion_reachability.py
 =============================
-Isaac Sim 5.0 / 5.1  Standalone Python 과제 코드
+RGB-D 센서 융합으로 "Target 물체가 로봇팔 작업 반경 안에 있는가?"를 판단하는
+Isaac Sim 5.0 / 5.1 Standalone 예제.
 
-주제: RGB + Depth 센서 융합 기반 "Target 식별 + 단순화된 작업 반경(Simplified Reachability) 판단"
+■ 이 코드가 답하는 질문
+  1) 여러 물체 중 어느 것이 Target 인가?          → RGB 로 판단 (색)
+  2) 그 Target 은 로봇에서 얼마나 떨어져 있는가?   → Depth 로 판단 (거리)
+  3) 그 거리가 MAX_REACH_M 이하인가?              → 최종 판정 (REACHABLE / OUT OF RANGE)
 
-  질문: "여러 객체 중 현재 작업 대상인 Target 은 무엇이며,
-         그 Target 은 로봇팔의 설정된 작업 가능 반경(MAX_REACH_M) 안에 있는가?"
+■ 처리 흐름 (한 카메라의 같은 frame 에서 RGB 와 Depth 를 함께 사용)
+  1. RGB 영상   : 색(HSV)으로 물체를 찾아 mask 와 중심 pixel (u, v) 를 구한다
+  2. Depth 영상 : 1 에서 구한 mask 안쪽 pixel 의 depth 만 모아 중앙값 Z 를 구한다
+  3. 3D 복원    : (u, v, Z) → 카메라 좌표 → world 좌표 → 로봇 base 좌표
+  4. 판정       : 로봇 base 원점까지의 거리 ≤ MAX_REACH_M 이면 REACHABLE
 
-데이터 흐름 (같은 카메라, 같은 render frame t):
-  RGB(t)   -> HSV 색상 검출 -> 객체별 mask / bbox / centroid(u,v)        [WHAT]
-  Depth(t) -> 객체 mask 내부의 valid depth 만 선택 -> median Z            [WHERE]
-  (u, v, Z) -> Camera frame(ROS optical) -> World -> Robot base frame
-            -> robot distance vs MAX_REACH_M -> Target 기준 FINAL DECISION
+■ 알아둘 점
+  - REACHABLE 은 "로봇 base 를 중심으로 한 반지름 MAX_REACH_M 구(sphere) 안에 있다"는 뜻일 뿐이다.
+    실제로 IK 를 풀 수 있는지, 잡을 수 있는지, 충돌 없이 접근할 수 있는지는 보장하지 않는다.
+  - 시뮬레이터가 알고 있는 물체의 실제 위치(Ground Truth)는 오차 확인용 출력에만 쓰고, 판정에는 쓰지 않는다.
 
-주의 사항:
-  - REACHABLE RANGE 는 "robot base 원점 기준 반경 MAX_REACH_M 구 안에 있다"는 뜻일 뿐,
-    IK / grasp / 충돌 회피가 가능하다는 보장이 아니다.
-  - Ground-truth(stage) object pose 는 "VALIDATION ONLY" 출력에만 사용하며
-    어떤 판단(Range / FINAL)에도 사용하지 않는다.
-
-실행 (Windows, Isaac Sim 설치 폴더에서):
+■ 실행 방법 (Windows, Isaac Sim 설치 폴더에서)
   python.bat C:\\path\\to\\sensor_fusion_reachability.py --scenario A
 
-★ 핵심 코드 지도 (에디터에서 "[CORE-" 로 검색하면 바로 이동)
-  [CORE-1] acquire_rgbd_frame()      : 같은 frame 의 RGB(t) + Depth(t) 획득 (동기화)
-  [CORE-2] detect_objects_rgb()      : RGB -> 객체 identity / Target 여부 / mask           (WHAT)
-  [CORE-3] extract_object_depth()    : RGB mask 가 고른 pixel 의 depth 만 사용 -> median Z  (융합 지점)
-  [CORE-4] pixel_depth_to_3d()       : (u, v, Z) -> camera frame -> world                  (WHERE)
-  [CORE-5] world_to_robot_base()     : world -> robot base frame (역변환 방향 주의)
-  [CORE-6] evaluate_reachability()   : 3D 거리 <= MAX_REACH_M ? -> Target 기준 FINAL
-  [CORE-7] process_rgbd()            : 위 1~6 을 한 frame 에 연결하는 Fusion 파이프라인
-  [CORE-8] depth_only_baseline()     : 단일 센서(Depth only) 비교용 baseline
-  [VIZ]    ReachVisualizer           : Viewport 에 MAX_REACH_M 반경 / Target 연결선 표시 (시각화 전용)
+■ 핵심 코드 위치 (에디터에서 "[CORE-" 로 검색)
+  [CORE-1] acquire_rgbd_frame()     같은 frame 의 RGB + Depth 가져오기
+  [CORE-2] detect_objects_rgb()     RGB 로 물체 찾기                 (무엇인가?)
+  [CORE-3] extract_object_depth()   물체 mask 안쪽의 depth 만 사용    ← 두 센서가 만나는 지점
+  [CORE-4] pixel_depth_to_3d()      pixel + depth → 3D 위치          (어디에 있나?)
+  [CORE-5] world_to_robot_base()    world 좌표 → 로봇 base 좌표
+  [CORE-6] evaluate_reachability()  거리 ≤ MAX_REACH_M ? → 최종 판정
+  [CORE-7] process_rgbd()           CORE-2 ~ 6 을 한 frame 에 순서대로 실행
+  [CORE-8] depth_only_baseline()    비교용: Depth 만 쓰면 어떻게 되는가
+  [VIZ]    ReachVisualizer          Viewport 에 작업 반경과 Target 연결선 그리기 (시각화 전용)
 """
 
 # =============================================================================
-# 0. 명령행 인자 (SimulationApp 생성 전에 파싱해야 함)
+# 0. 명령행 인자   ※ SimulationApp 을 만들기 전에 읽어야 한다
 # =============================================================================
 import argparse
 import csv
@@ -59,7 +59,7 @@ def _parse_args():
                         help="also open OpenCV windows (annotated RGB + depth); off by default")
     parser.add_argument("--no-depth-window", action="store_true", help="with --cv-windows: skip the depth window")
     parser.add_argument("--save", action="store_true", help="periodically save results to output/")
-    # Kit 이 추가 인자를 넘길 수 있으므로 parse_known_args 사용
+    # Isaac Sim(Kit)이 자체 인자를 덧붙일 수 있으므로, 모르는 인자는 무시한다
     args, _unknown = parser.parse_known_args()
     return args
 
@@ -67,67 +67,71 @@ def _parse_args():
 ARGS = _parse_args()
 
 # =============================================================================
-# 1. CONFIG  (과제 실험 시 이 블록만 수정하면 됨)
+# 1. 설정값   ※ 실험 조건을 바꿀 때는 이 블록만 수정하면 된다
 # =============================================================================
 
 # ---- 실험 조건 ----------------------------------------------------------------
-SCENARIO = (ARGS.scenario or "A").upper()          # "A" / "B" / "C" (실행 중 a/b/c 키로도 변경 가능)
-TARGET_NAME = ARGS.target or "RedContainer"        # OBJECT_SPECS 의 name 중 하나
-# MAX_REACH_M: 제조사 공식 reach 값이 아니다.
-# 이번 센서 융합 실험에서 사용하는 "단순화된 작업 가능 반경" [m] (robot base 원점 중심의 구).
+SCENARIO = (ARGS.scenario or "A").upper()          # 물체 배치 프리셋 "A" / "B" / "C" (실행 중 패널 버튼으로도 변경)
+TARGET_NAME = ARGS.target or "RedContainer"        # 판정 대상 물체 이름 (OBJECT_SPECS 의 name 중 하나)
+# 로봇 base 를 중심으로 한 구(sphere)의 반지름 [m].
+# 이 실험을 위해 단순화한 "작업 가능 반경"이며, 제조사 공식 사양값이 아니다.
 MAX_REACH_M = ARGS.max_reach if ARGS.max_reach is not None else 0.70
 
-# ---- Scene geometry (world frame: Z-up, 단위 m) ----------------------------------
+# ---- 작업대 (world 좌표: Z 축이 위쪽, 단위 m) -------------------------------------
 TABLE_TOP_Z = 0.40                                  # 작업대 윗면 높이 [m]
-# x: -1.40 ~ 2.20, y: -1.50 ~ 1.50  -> robot base(0,0) 에서 가장 가까운 가장자리까지 1.40 m.
-# Reach 반경 ~1.3 m 까지 작업대 안에 표시됨. 앞쪽 가장자리(y=-1.5)는 카메라(y=-1.75)보다 안쪽.
+# 작업대 범위: x -1.40 ~ 2.20, y -1.50 ~ 1.50
+#   - 로봇 base(0, 0)에서 가장 가까운 가장자리까지 1.40 m → 반경 약 1.3 m 까지는 작업대 위에 그려진다.
+#   - 앞쪽 가장자리(y = -1.5)는 카메라 위치(y = -1.75)보다 안쪽에 있다.
 TABLE_CENTER_XY = (0.40, 0.0)
 TABLE_SIZE_XY = (3.60, 3.00)
-# 밝은 배경과 대비되는 저채도 dark charcoal. 파란 기가 강하면(hue ~110) BLUE 범위에 가까워지므로
-# R,G,B 차이를 작게 둬서 채도(S)를 BLUE/GREEN/RED 검출 하한(S>=100)보다 훨씬 낮게 유지한다.
+# 작업대 색: 채도가 낮은 짙은 회색.
+#   색 검출은 채도(S)가 100 이상인 pixel 만 보므로, R·G·B 를 비슷하게 맞춰 채도를 낮게 유지한다.
+#   (파란 기가 강하면 BLUE 로 잘못 검출될 수 있음)
 TABLE_COLOR = (0.18, 0.19, 0.21)
 
-# ---- 배경 / 바닥 / 작업대 외형 (시각 요소일 뿐 판단 로직과 무관) ----------------------------
-# 창고형 작업 현장: 콘크리트 슬래브 바닥 + 노란 안전선, 콘크리트 블록 하부벽 + 골강판(금속) 상부벽,
-# 철골 기둥(노란 보호대), 개방형 지붕 트러스, 파렛트 랙/박스, 철제 작업대, 카메라 스탠드.
-# 색 선택 규칙 (RGB 색 검출 보호):
-#   - 대부분 저채도 회색/금속 -> 채도 S 가 검출 하한(S >= 100)보다 훨씬 낮음
-#   - 안전 노랑: OpenCV hue ~23  -> RED(0~10, 170~179) / GREEN(40~85) 범위 밖
-#   - 골판지/파렛트 갈색: hue ~17, S ~95 -> RED 범위 밖 + RED 채도 하한(120) 미만
-#   - 빨강/파랑/초록 소품은 넣지 않음 (Isaac 창고 asset 을 쓰지 않는 이유: 색 소품 오검출, 지붕에 의한 조명 차단)
-ENVIRONMENT_STYLE = "warehouse"             # "warehouse" 또는 "plain"(넓은 회색 바닥만)
-FLOOR_SIZE_M = 60.0                         # 바닥(GroundPlane, collider) 한 변 [m]
-FLOOR_JOINT_COLOR = (0.20, 0.20, 0.20)      # GroundPlane 색 = 슬래브 사이 줄눈(saw-cut) 색
-FLOOR_PANEL_SIZE_M = 2.0                    # 콘크리트 슬래브 한 변 [m]
-FLOOR_CONCRETE_COLORS = ((0.47, 0.47, 0.45), (0.50, 0.49, 0.47), (0.44, 0.44, 0.43))
+# ---- 배경 (보기 위한 장식일 뿐, 판정 로직과는 무관) ----------------------------------------
+# 창고 작업장 구성: 콘크리트 바닥 + 노란 안전선, 블록/금속 벽, 철골 기둥, 지붕 트러스, 파렛트 랙, 카메라 스탠드
+#
+# 색을 고를 때 지킨 규칙 (배경이 물체로 잘못 검출되지 않도록):
+#   - 대부분 회색/금속색                   → 채도가 낮아 검출 대상에서 자연히 빠짐
+#   - 안전선 노랑 (hue ≈ 23)               → RED(0~10, 170~179), GREEN(40~85) 범위 밖
+#   - 골판지/파렛트 갈색 (hue ≈ 17, S ≈ 95) → RED 범위 밖이고, RED 채도 하한(120)보다도 낮음
+#   - 빨강·파랑·초록 소품은 두지 않음
+#     (Isaac 기본 창고 asset 을 쓰지 않은 이유: 색 있는 소품이 오검출되고, 지붕이 조명을 가림)
+ENVIRONMENT_STYLE = "warehouse"             # "warehouse" = 창고 배경 / "plain" = 회색 바닥만
+FLOOR_SIZE_M = 60.0                         # 바닥 한 변 길이 [m] (충돌체 있음)
+FLOOR_JOINT_COLOR = (0.20, 0.20, 0.20)      # 바닥 기본색 = 콘크리트 판 사이 줄눈 색
+FLOOR_PANEL_SIZE_M = 2.0                    # 콘크리트 판 한 변 [m]
+FLOOR_CONCRETE_COLORS = ((0.47, 0.47, 0.45), (0.50, 0.49, 0.47), (0.44, 0.44, 0.43))   # 판마다 번갈아 쓰는 3가지 톤
 ROOM_CENTER_XY = TABLE_CENTER_XY
 ROOM_SIZE_XY = (16.0, 14.0)                 # 벽 안쪽 크기 [m]
 ROOM_WALL_HEIGHT_M = 6.0
-WALL_BLOCK_HEIGHT_M = 1.2                   # 하부 콘크리트 블록 높이
+WALL_BLOCK_HEIGHT_M = 1.2                   # 벽 아래쪽 콘크리트 블록 높이 [m]
 WALL_BLOCK_COLOR = (0.52, 0.52, 0.50)
-WALL_CLADDING_COLOR = (0.68, 0.69, 0.70)    # 상부 골강판 (금속)
-STEEL_DARK_COLOR = (0.28, 0.29, 0.31)       # 기둥 / 트러스 / 카메라 스탠드
-STEEL_GALV_COLOR = (0.60, 0.61, 0.63)       # 아연도금 강재 (랙 기둥, 작업대 다리)
-SAFETY_YELLOW = (0.95, 0.75, 0.05)          # 바닥 안전선, 기둥 보호대, 랙 빔, 작업대 테두리
+WALL_CLADDING_COLOR = (0.68, 0.69, 0.70)    # 벽 위쪽 금속 골강판
+STEEL_DARK_COLOR = (0.28, 0.29, 0.31)       # 기둥 · 지붕 트러스 · 카메라 스탠드
+STEEL_GALV_COLOR = (0.60, 0.61, 0.63)       # 아연도금 강재 (랙 기둥 · 작업대 다리)
+SAFETY_YELLOW = (0.95, 0.75, 0.05)          # 바닥 안전선 · 기둥 보호대 · 랙 빔 · 작업대 테두리
 CARDBOARD_COLOR = (0.55, 0.46, 0.34)
 PALLET_WOOD_COLOR = (0.50, 0.42, 0.32)
 WORKBENCH_TOP_THICKNESS_M = 0.06
-# 선택: 실제 텍스처 재질(MDL)을 쓰고 싶으면 Content Browser 에서 .mdl 파일 우클릭 > Copy URL 후 붙여넣기.
-# (빨강/파랑/초록 계열 재질은 색 검출을 방해하므로 회색 콘크리트/금속 계열만 사용)  빈 문자열 = 사용 안 함
+# (선택) 실제 텍스처 재질(MDL) 사용하기
+#   Content Browser 에서 .mdl 파일 우클릭 → Copy URL 후 아래에 붙여넣는다. 빈 문자열이면 사용 안 함.
+#   빨강·파랑·초록 계열 재질은 색 검출을 방해하므로 회색 콘크리트/금속 계열만 쓸 것.
 MDL_OVERRIDES = {"floor": "", "walls": "", "workbench_top": ""}
 
-# ---- Robot --------------------------------------------------------------------
+# ---- 로봇 ----------------------------------------------------------------------
 ROBOT_PRIM_PATH = "/World/Franka"
-# 아래 두 값은 "scene 생성 시 로봇을 배치"하는 데에만 사용한다.
-# 런타임 좌표변환에서는 이 숫자를 쓰지 않고, 매 처리 frame 마다 stage 에서 robot base pose 를 다시 읽는다.
+# 아래 두 값은 처음 scene 을 만들 때 로봇을 놓는 위치로만 쓴다.
+# 좌표 변환에는 이 숫자 대신, 매 frame stage 에서 읽은 실제 로봇 base 위치를 사용한다.
 ROBOT_INITIAL_POSITION = (0.0, 0.0, TABLE_TOP_Z)
 ROBOT_INITIAL_YAW_DEG = 0.0
-# 화면 구성을 위한 Franka 대기 자세 (7 arm + 2 finger). 로봇 동작/IK 는 과제 범위가 아님.
+# Franka 대기 자세 (팔 관절 7개 + 그리퍼 2개). 화면 구성용이며, 로봇 동작/IK 는 다루지 않는다.
 ROBOT_HOME_JOINTS = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04]
-# Franka asset 경로: 우선순위대로 시도한다.
-#  - 환경변수 FRANKA_USD_PATH 또는 FRANKA_USD_OVERRIDE 에 로컬/Nucleus 전체 경로를 넣으면 그것을 먼저 사용
-#  - Isaac Sim 5.0/5.1 asset 구조: /Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd
-#  - Isaac Sim 4.x asset 구조:     /Isaac/Robots/Franka/franka.usd
+# Franka USD 파일 경로 — 아래 순서대로 시도한다.
+#   1) 환경변수 FRANKA_USD_PATH 에 지정한 경로 (로컬 또는 Nucleus 전체 경로)
+#   2) Isaac Sim 5.0/5.1 기본 경로: /Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd
+#   3) Isaac Sim 4.x 기본 경로:     /Isaac/Robots/Franka/franka.usd
 FRANKA_USD_OVERRIDE = os.environ.get("FRANKA_USD_PATH", "")
 FRANKA_USD_RELATIVE_CANDIDATES = [
     "/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd",
@@ -135,19 +139,20 @@ FRANKA_USD_RELATIVE_CANDIDATES = [
     "/Isaac/Robots/Franka/franka_instanceable.usd",
 ]
 
-# ---- RGB-D Camera (eye-to-hand, 고정) --------------------------------------------
+# ---- RGB-D 카메라 (로봇 밖에 고정 설치, eye-to-hand) -----------------------------
 CAMERA_PRIM_PATH = "/World/RGBD_Camera"
-# 확대된 작업대 기준으로 Franka 전체(대기 자세 상단 포함)와 A/B/C 모든 객체가 화면 안에 들어오도록 조정
-CAMERA_POSITION = (1.00, -1.75, 1.45)               # world [m]
-CAMERA_TARGET = (0.45, 0.05, 0.55)                  # 카메라가 바라보는 world 점 [m]
-CAMERA_RESOLUTION = (640, 480)                      # (width, height) [px]
-CAMERA_FREQUENCY = 20                               # [Hz] 카메라 annotator 갱신 주기
-CAMERA_FOCAL_LENGTH_MM = 18.0                       # USD focalLength (수평 FOV ~60 deg)
-CAMERA_HORIZONTAL_APERTURE_MM = 20.955              # USD horizontalAperture
-CAMERA_CLIPPING_RANGE = (0.05, 50.0)                # [m]
+# Franka 전체(대기 자세 윗부분 포함)와 A/B/C 시나리오의 모든 물체가 한 화면에 들어오도록 맞춘 위치
+CAMERA_POSITION = (1.00, -1.75, 1.45)               # 카메라 위치 (world) [m]
+CAMERA_TARGET = (0.45, 0.05, 0.55)                  # 카메라가 바라보는 점 (world) [m]
+CAMERA_RESOLUTION = (640, 480)                      # 해상도 (가로, 세로) [px]
+CAMERA_FREQUENCY = 20                               # 카메라 영상 갱신 주기 [Hz]
+CAMERA_FOCAL_LENGTH_MM = 18.0                       # 초점거리 [mm] → 수평 화각 약 60°
+CAMERA_HORIZONTAL_APERTURE_MM = 20.955              # 센서 가로 크기 [mm]
+CAMERA_CLIPPING_RANGE = (0.05, 50.0)                # 렌더링 거리 범위 (최소, 최대) [m]
 
-# ---- Objects -------------------------------------------------------------------
-# role 은 TARGET_NAME 으로부터 자동 결정된다 (TARGET_NAME 을 바꾸면 Target 이 바뀜).
+# ---- 물체 ----------------------------------------------------------------------
+# 각 물체가 TARGET 인지 아닌지는 TARGET_NAME 으로 자동 결정된다.
+# color_key: 아래 COLOR_RANGES 중 어떤 색 범위로 이 물체를 찾을지
 OBJECT_SPECS = [
     {"name": "RedContainer", "visual": "red opaque plastic container (cylinder)",
      "shape": "cylinder", "radius": 0.045, "height": 0.12,
@@ -160,87 +165,92 @@ OBJECT_SPECS = [
      "display_color": (0.05, 0.70, 0.10), "color_key": "GREEN", "roughness": 0.35, "metallic": 0.5},
 ]
 
-# 시나리오별 초기 XY [m] (Z 는 작업대 위에 놓이도록 자동 계산). 시작 시 1회만 적용,
-# 실행 중에는 사용자가 키(a/b/c)를 누를 때만 1회 적용. 매 frame 강제 재설정하지 않음.
+# 시나리오별 물체 초기 위치 (x, y) [m]. 높이 z 는 작업대 위에 놓이도록 자동 계산한다.
+# 프리셋은 시작할 때, 그리고 사용자가 시나리오를 바꿀 때 한 번만 적용된다.
+# 그 뒤에는 UI 에서 물체를 자유롭게 옮길 수 있다 (매 frame 위치를 되돌리지 않음).
 SCENARIO_PRESETS = {
-    # A: Target 이 반경 안 -> REACHABLE RANGE
+    # A: Target 이 반경 안 → REACHABLE RANGE
     "A": {"RedContainer": (0.45, 0.10), "BlueBox": (0.70, -0.35), "GreenMetalSphere": (0.20, 0.45)},
-    # B: Target 이 멀리 -> OUT OF RANGE
+    # B: Target 이 반경 밖 → OUT OF RANGE
     "B": {"RedContainer": (1.00, 0.25), "BlueBox": (0.60, -0.20), "GreenMetalSphere": (0.45, 0.35)},
-    # C: Distractor(BlueBox)가 카메라/로봇에 매우 가깝고 Target 은 반경 밖
-    #    -> Depth-only "가장 가까운 것 = target" 가정은 틀리고, Fusion 은 OUT OF RANGE
+    # C: 방해 물체(BlueBox)가 로봇·카메라에 가장 가깝고, Target 은 반경 밖
+    #    → Depth 만 보고 "가장 가까운 물체 = Target" 이라고 가정하면 틀린다. 융합 결과는 OUT OF RANGE.
     "C": {"RedContainer": (0.95, 0.30), "BlueBox": (0.30, -0.35), "GreenMetalSphere": (0.75, 0.45)},
 }
 if SCENARIO not in SCENARIO_PRESETS:
     SCENARIO = "A"
 OBJECT_INITIAL_POSITIONS = SCENARIO_PRESETS[SCENARIO]
 
-# ---- RGB detection (OpenCV HSV 스케일: H 0-179, S 0-255, V 0-255) ---------------
+# ---- RGB 색 검출 (OpenCV HSV 범위: H 0~179, S 0~255, V 0~255) ----------------------
+# 색마다 (하한, 상한) 쌍의 리스트. 형식: ((H, S, V), (H, S, V))
 COLOR_RANGES = {
-    "RED":   [((0, 120, 60), (10, 255, 255)), ((170, 120, 60), (179, 255, 255))],  # 빨강은 hue 가 0/180 에서 wrap
+    "RED":   [((0, 120, 60), (10, 255, 255)), ((170, 120, 60), (179, 255, 255))],  # 빨강은 hue 0 과 179 양 끝에 걸쳐 있어 둘로 나눔
     "BLUE":  [((100, 120, 50), (130, 255, 255))],
     "GREEN": [((40, 100, 50), (85, 255, 255))],
 }
-MIN_MASK_PIXELS = 60            # 이보다 작은 mask 는 DETECTED = NO (노이즈/거의 가려짐)
+MIN_MASK_PIXELS = 60            # mask 가 이보다 작으면 미검출로 처리 (노이즈이거나 거의 가려진 경우)
 
 # ---- Depth ---------------------------------------------------------------------
-MIN_VALID_DEPTH_PIXELS = 20     # mask 내부 valid depth 가 이보다 적으면 INVALID DEPTH
-DEPTH_MAX_VALID_M = 20.0        # 이보다 먼 값은 배경/far-plane 으로 보고 제외
-DEPTH_ERODE_MASK = True         # 물체 경계(배경 depth 섞임) 제외를 위해 mask 를 1px 침식 후 사용
+MIN_VALID_DEPTH_PIXELS = 20     # mask 안의 유효 depth pixel 이 이보다 적으면 INVALID DEPTH
+DEPTH_MAX_VALID_M = 20.0        # 이보다 먼 depth 는 배경으로 보고 버린다 [m]
+DEPTH_ERODE_MASK = True         # mask 가장자리를 1px 깎아서 사용 (물체 경계에 섞인 배경 depth 제거)
 
-# ---- 3D unprojection -----------------------------------------------------------
-USE_OFFICIAL_UNPROJECTION = True    # Camera.get_world_points_from_image_coords() 우선 사용
-UNPROJECTION_CHECK_TOL_M = 0.01     # 공식 helper 와 직접 pinhole 계산의 차이 허용치 (불일치 시 경고)
+# ---- pixel → 3D 변환 -----------------------------------------------------------
+USE_OFFICIAL_UNPROJECTION = True    # Isaac Sim 공식 함수 get_world_points_from_image_coords() 를 우선 사용
+UNPROJECTION_CHECK_TOL_M = 0.01     # 공식 함수 결과와 직접 계산 결과의 허용 오차 [m] (넘으면 경고)
 
-# ---- Depth-only baseline (비교용) ------------------------------------------------
-# Depth 만으로 "작업대 위에 솟아있는 가장 가까운 표면"을 찾는다. (RGB 사용 안 함 -> identity 모름)
-DEPTH_ONLY_STRIDE = 2                       # 연산량 절감을 위한 pixel subsampling
-DEPTH_ONLY_HEIGHT_BAND = (0.015, 0.25)      # 작업대 윗면 기준 높이 범위 [m]
-DEPTH_ONLY_ROBOT_EXCLUSION_RADIUS = 0.20    # robot base 주변(XY) 로봇 자기 몸체 제외 반경 [m]
+# ---- 비교용: Depth 만 쓰는 방식 ----------------------------------------------------
+# RGB 없이 "작업대 위로 솟아 있는 표면 중 가장 가까운 점"을 찾는다. → 그게 어떤 물체인지는 모른다.
+DEPTH_ONLY_STRIDE = 2                       # 계산량을 줄이기 위해 2 pixel 마다 1개만 사용
+DEPTH_ONLY_HEIGHT_BAND = (0.015, 0.25)      # 작업대 윗면 기준, 이 높이 범위의 점만 물체 후보로 본다 [m]
+DEPTH_ONLY_ROBOT_EXCLUSION_RADIUS = 0.20    # 로봇 base 주변 이 반경(XY) 안은 로봇 몸체로 보고 제외 [m]
 
-# ---- 출력 / 시각화 / 저장 ----------------------------------------------------------
-SHOW_FUSION_MONITOR = not ARGS.no_monitor  # Isaac Sim 내부 omni.ui "RGB-D Fusion Monitor" 패널 (기본)
-MONITOR_WIDTH = 380                         # [px]
+# ---- 결과 패널 (Isaac Sim 안의 "RGB-D Fusion Monitor") ------------------------------
+SHOW_FUSION_MONITOR = not ARGS.no_monitor  # 패널 표시 여부 (--no-monitor 로 끔)
+MONITOR_WIDTH = 380                         # 패널 크기 [px]
 MONITOR_HEIGHT = 840
-MONITOR_DOCK_RIGHT_OF_VIEWPORT = True       # True: Viewport 오른쪽에 dock 시도 (실패 시 floating 유지)
-MONITOR_DOCK_RATIO = 0.27                   # dock 시 패널이 차지할 비율 (레이아웃이 어색하면 False 로)
-# ---- Reach 시각화 (isaacsim.util.debug_draw, 물리/USD 에 영향 없는 시각화 전용) ----
+MONITOR_DOCK_RIGHT_OF_VIEWPORT = True       # Viewport 오른쪽에 붙이기 (실패하면 떠 있는 창으로 유지)
+MONITOR_DOCK_RATIO = 0.27                   # 붙였을 때 패널이 차지하는 폭 비율 (어색하면 위 값을 False 로)
+
+# ---- 작업 반경 시각화 (Viewport 에 선만 그림. 물리 / USD / 판정에 영향 없음) ----------------
 REACH_VIZ_ENABLED = True
-REACH_VIZ_TABLE_OFFSET_M = 0.005            # 작업대 표면 원을 표면보다 살짝 위에 그려 z-fighting 방지
-# 색은 (r, g, b, a) 0~1. boundary 는 저채도 light blue 로 두어(S < 100/255) RGB 검출의
-# RED/GREEN/BLUE HSV 범위와 겹치지 않게 했다 (debug draw 가 카메라 영상에 찍히는 경우 대비).
-REACH_VIZ_BOUNDARY_COLOR = (0.65, 0.85, 0.95, 0.55)
-REACH_VIZ_TABLE_RING_COLOR = (0.70, 0.88, 0.97, 0.85)
-REACH_VIZ_BASE_COLOR = (1.0, 1.0, 1.0, 1.0)
-REACH_VIZ_IN_COLOR = (0.15, 0.90, 0.25, 1.0)
-REACH_VIZ_OUT_COLOR = (1.00, 0.20, 0.20, 1.0)
-REACH_VIZ_BOUNDARY_WIDTH = 1.5             # [px]
+REACH_VIZ_TABLE_OFFSET_M = 0.005            # 작업대 위 원을 표면보다 5 mm 띄워 그림 (표면과 겹쳐 깜빡이는 현상 방지)
+# 색: (r, g, b, a), 각 0~1
+#   경계선은 채도 낮은 하늘색으로 그려, 혹시 카메라 영상에 찍혀도 RED/GREEN/BLUE 로 검출되지 않게 했다.
+REACH_VIZ_BOUNDARY_COLOR = (0.65, 0.85, 0.95, 0.55)     # 반구 wireframe
+REACH_VIZ_TABLE_RING_COLOR = (0.70, 0.88, 0.97, 0.85)   # 작업대 위 원
+REACH_VIZ_BASE_COLOR = (1.0, 1.0, 1.0, 1.0)             # 로봇 base 표시
+REACH_VIZ_IN_COLOR = (0.15, 0.90, 0.25, 1.0)            # Target 연결선 (반경 안)
+REACH_VIZ_OUT_COLOR = (1.00, 0.20, 0.20, 1.0)           # Target 연결선 (반경 밖)
+REACH_VIZ_BOUNDARY_WIDTH = 1.5             # 선 두께 [px]
 REACH_VIZ_TABLE_RING_WIDTH = 2.5
-REACH_VIZ_TARGET_LINE_WIDTH = 2.0          # 얇게: 카메라 영상에 찍혀도 3x3 morphology open 으로 제거되는 두께
-REACH_VIZ_TARGET_MARKER_SIZE = 8.0         # [px]
-REACH_VIZ_LATITUDES_DEG = (30.0, 60.0)     # 상부 hemisphere 위도 ring
-SHOW_OVERLAY = bool(ARGS.cv_windows)        # OpenCV annotated RGB 창 (선택 fallback, 기본 끔)
-SHOW_DEPTH_WINDOW = bool(ARGS.cv_windows) and not ARGS.no_depth_window  # OpenCV depth 창 (보조)
-SHOW_GT_VALIDATION = True                   # GT 기반 검증 출력 (판단에는 사용하지 않음)
-PRINT_INTERVAL_FRAMES = 15                  # 콘솔 표 출력 주기 [simulation step]
-WARMUP_FRAMES = 20                          # 시작 직후 센서 버퍼가 비어있는 구간 skip
-SAVE_RESULTS = bool(ARGS.save)              # True 면 SAVE_INTERVAL_FRAMES 마다 output/ 에 저장
+REACH_VIZ_TARGET_LINE_WIDTH = 2.0          # 얇게 유지: 카메라에 찍혀도 색 검출의 노이즈 제거(3x3) 단계에서 지워짐
+REACH_VIZ_TARGET_MARKER_SIZE = 8.0         # Target 점 크기 [px]
+REACH_VIZ_LATITUDES_DEG = (30.0, 60.0)     # 반구에 그릴 위도선 [deg]
+
+# ---- 기타 출력 / 저장 --------------------------------------------------------------
+SHOW_OVERLAY = bool(ARGS.cv_windows)        # OpenCV 결과 이미지 창 (--cv-windows 로 켬, 기본 끔)
+SHOW_DEPTH_WINDOW = bool(ARGS.cv_windows) and not ARGS.no_depth_window  # OpenCV depth 이미지 창 (보조)
+SHOW_GT_VALIDATION = True                   # 실제 위치(GT)와의 오차 출력 (판정에는 사용 안 함)
+PRINT_INTERVAL_FRAMES = 15                  # 콘솔 결과 출력 간격 [step]
+WARMUP_FRAMES = 20                          # 시작 직후 카메라 버퍼가 비어 있는 구간은 건너뜀 [step]
+SAVE_RESULTS = bool(ARGS.save)              # True 면 SAVE_INTERVAL_FRAMES 마다 output/ 에 자동 저장 (--save)
 SAVE_INTERVAL_FRAMES = 300
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
-DEPTH_VIS_RANGE_M = (1.0, 3.5)              # depth 컬러맵 표시 범위 [m]
+DEPTH_VIS_RANGE_M = (1.0, 3.5)              # depth 이미지 색 표시 범위 [m]
 
-# ---- Simulation ----------------------------------------------------------------
-PHYSICS_DT = 1.0 / 60.0
-RENDERING_DT = 1.0 / 60.0
-DOME_LIGHT_INTENSITY = 700.0
-KEY_LIGHT_INTENSITY = 1500.0
+# ---- 시뮬레이션 ------------------------------------------------------------------
+PHYSICS_DT = 1.0 / 60.0                     # 물리 계산 간격 [s]
+RENDERING_DT = 1.0 / 60.0                   # 렌더링 간격 [s]
+DOME_LIGHT_INTENSITY = 700.0                # 전체 환경광 세기
+KEY_LIGHT_INTENSITY = 1500.0                # 주 조명(햇빛) 세기
 
 # =============================================================================
-# 2. SimulationApp 시작 (다른 omni / isaacsim import 보다 반드시 먼저)
+# 2. SimulationApp 시작   ※ 다른 omni / isaacsim 모듈을 import 하기 전에 반드시 먼저
 # =============================================================================
 from isaacsim import SimulationApp  # noqa: E402
 
-# window_width/height = Isaac Sim 앱 창 크기, width/height = viewport 렌더 해상도
+# window_width/height: 앱 창 크기,  width/height: Viewport 렌더링 해상도
 simulation_app = SimulationApp({"headless": False, "window_width": 1600, "window_height": 900,
                                 "width": 1280, "height": 720})
 
@@ -253,7 +263,7 @@ def log(msg, level="INFO"):
 
 
 class RateLimitedLog:
-    """같은 종류의 경고가 매 frame 콘솔을 도배하지 않도록 key 별로 간격을 둔다."""
+    """같은 경고가 매 frame 콘솔에 반복 출력되지 않도록, 경고 종류(key)별로 최소 간격을 둔다."""
 
     def __init__(self, interval_s=3.0):
         self.interval_s = interval_s
@@ -271,7 +281,7 @@ RL = RateLimitedLog()
 # ---- Isaac Sim 5.x 필수 모듈 ------------------------------------------------------
 try:
     from isaacsim.core.utils.extensions import enable_extension
-    enable_extension("isaacsim.sensors.camera")      # 기본 experience 에 포함되어 있지만 명시적으로 활성화
+    enable_extension("isaacsim.sensors.camera")      # 기본으로 켜져 있지만 확실히 하기 위해 다시 켬
 except Exception as _e:  # noqa: BLE001
     log(f"enable_extension('isaacsim.sensors.camera') failed (may already be enabled): {_e}", "WARN")
 
@@ -288,7 +298,7 @@ except ImportError as _e:
     simulation_app.close()
     sys.exit(1)
 
-# ---- 선택 모듈 (없으면 해당 기능만 비활성화) ------------------------------------------
+# ---- 선택 모듈 (없으면 해당 기능만 꺼지고 나머지는 정상 동작) ------------------------------
 try:
     from isaacsim.core.api.objects import GroundPlane
 except ImportError:
@@ -304,21 +314,21 @@ try:
 except ImportError:
     PreviewSurface = None
 
-# get_assets_root_path: 5.x 공식 위치는 isaacsim.storage.native
+# asset 저장소 경로 함수: 5.x 는 isaacsim.storage.native, 4.x 는 isaacsim.core.utils.nucleus 에 있다
 _get_assets_root_path = None
 try:
     from isaacsim.storage.native import get_assets_root_path as _get_assets_root_path
 except ImportError:
-    try:  # 구버전(4.x) 위치. 5.x 에서는 deprecated/없을 수 있음
+    try:  # 4.x 위치 (5.x 에서는 없을 수 있음)
         from isaacsim.core.utils.nucleus import get_assets_root_path as _get_assets_root_path
     except ImportError:
         _get_assets_root_path = None
 
-# ---- debug_draw (Viewport reach 시각화, 선택) -------------------------------------------
-# Isaac Sim 5.x 공식 extension: isaacsim.util.debug_draw
+# ---- debug_draw: Viewport 에 선/점을 그리는 도구 (작업 반경 시각화용, 선택) -------------------
+# 사용법:
 #   draw = _debug_draw.acquire_debug_draw_interface()
-#   draw.draw_lines(starts, ends, colors, widths) / draw.draw_points(points, colors, sizes)
-#   draw.clear_lines() / draw.clear_points() / _debug_draw.release_debug_draw_interface(draw)
+#   draw.draw_lines(시작점들, 끝점들, 색들, 두께들)  /  draw.draw_points(점들, 색들, 크기들)
+#   draw.clear_lines()  /  draw.clear_points()  /  _debug_draw.release_debug_draw_interface(draw)
 _debug_draw = None
 try:
     from isaacsim.core.utils.extensions import enable_extension as _enable_ext
@@ -328,14 +338,14 @@ except Exception as _e:  # noqa: BLE001
     _debug_draw = None
     log(f"isaacsim.util.debug_draw not available ({_e}); reach visualization disabled.", "WARN")
 
-# ---- omni.ui (Isaac Sim 내부 패널, 선택) ---------------------------------------------
+# ---- omni.ui: Isaac Sim 안에 결과 패널을 띄우는 UI 라이브러리 (선택) ----------------------
 try:
     import omni.ui as ui
 except Exception as _e:  # noqa: BLE001
     ui = None
     log(f"omni.ui not available ({_e}); Fusion Monitor panel disabled (console only).", "WARN")
 
-# ---- OpenCV (선택) -------------------------------------------------------------
+# ---- OpenCV (선택. 없으면 numpy 로 색 검출하고, 이미지 창 / PNG 저장은 꺼짐) --------------
 try:
     import cv2
 except Exception as _e:  # noqa: BLE001
@@ -345,10 +355,10 @@ except Exception as _e:  # noqa: BLE001
 
 
 # =============================================================================
-# 3. 수학 helper (quaternion 은 Isaac Sim 규약과 같은 scalar-first (w, x, y, z))
+# 3. 수학 helper   ※ quaternion 은 Isaac Sim 과 같은 (w, x, y, z) 순서
 # =============================================================================
 def quat_wxyz_to_rotmat(q):
-    """(w,x,y,z) quaternion -> 3x3 회전행렬 R.  p_parent = R @ p_child."""
+    """quaternion (w, x, y, z) → 3x3 회전행렬 R.   (자식 좌표의 점 p 를 부모 좌표로: R @ p)"""
     w, x, y, z = [float(c) for c in np.asarray(q, dtype=float).reshape(4)]
     n = math.sqrt(w * w + x * x + y * y + z * z)
     if n < 1e-12:
@@ -362,7 +372,7 @@ def quat_wxyz_to_rotmat(q):
 
 
 def rotmat_to_quat_wxyz(R):
-    """3x3 회전행렬 -> (w,x,y,z) quaternion (Shepperd 방법)."""
+    """3x3 회전행렬 → quaternion (w, x, y, z).  (수치적으로 안정한 Shepperd 방법)"""
     R = np.asarray(R, dtype=float)
     tr = R[0, 0] + R[1, 1] + R[2, 2]
     if tr > 0:
@@ -381,14 +391,16 @@ def rotmat_to_quat_wxyz(R):
     return q / np.linalg.norm(q)
 
 
+# Z 축 회전각 yaw [deg] → quaternion (w, x, y, z)
 def yaw_to_quat_wxyz(yaw_deg):
     h = math.radians(yaw_deg) / 2.0
     return np.array([math.cos(h), 0.0, 0.0, math.sin(h)])
 
 
 def look_at_quat_usd(eye, target, world_up=(0.0, 0.0, 1.0)):
-    """USD 카메라 규약(로컬 -Z 가 시선, +Y 가 화면 위, +X 가 화면 오른쪽)으로
-    eye 에서 target 을 바라보는 world orientation (w,x,y,z) 을 계산한다."""
+    """eye 위치에서 target 을 바라보는 카메라 방향을 quaternion (w, x, y, z) 으로 계산한다.
+
+    USD 카메라 축 규약: 로컬 -Z = 바라보는 방향, +Y = 화면 위쪽, +X = 화면 오른쪽"""
     eye = np.asarray(eye, dtype=float)
     target = np.asarray(target, dtype=float)
     f = target - eye
@@ -396,17 +408,17 @@ def look_at_quat_usd(eye, target, world_up=(0.0, 0.0, 1.0)):
         raise ValueError("CAMERA_POSITION and CAMERA_TARGET must be different points")
     f /= np.linalg.norm(f)
     up = np.asarray(world_up, dtype=float)
-    if abs(float(np.dot(f, up))) > 0.999:          # 수직으로 내려다보는 특이 경우
+    if abs(float(np.dot(f, up))) > 0.999:          # 바로 위/아래를 보면 외적이 0 이 되므로 up 벡터를 바꿈
         up = np.array([0.0, 1.0, 0.0])
     r = np.cross(f, up)
     r /= np.linalg.norm(r)
     u = np.cross(r, f)
-    R = np.column_stack([r, u, -f])                # 열 = 카메라 로컬 x, y, z 축의 world 방향
+    R = np.column_stack([r, u, -f])                # 각 열 = 카메라의 x, y, z 축이 world 에서 가리키는 방향
     return rotmat_to_quat_wxyz(R)
 
 
 def fmt(v, nd=2, width=0):
-    """None/NaN 이면 'N/A'."""
+    """숫자를 소수점 nd 자리 문자열로 바꾼다. 값이 None / NaN 이면 'N/A'."""
     if v is None or (isinstance(v, float) and not math.isfinite(v)):
         s = "N/A"
     else:
@@ -414,18 +426,20 @@ def fmt(v, nd=2, width=0):
     return s.rjust(width) if width else s
 
 
+# 3D 벡터 → "(+x, +y, +z)" 문자열. None 이면 'N/A'
 def fmt_vec(v, nd=2):
     if v is None:
         return "N/A"
     return "(" + ", ".join(f"{float(c):+.{nd}f}" for c in v) + ")"
 
 
+# 물체 이름이 TARGET_NAME 과 같으면 "TARGET", 아니면 "NON_TARGET"
 def object_role(name):
     return "TARGET" if name == TARGET_NAME else "NON_TARGET"
 
 
 def object_center_z(spec):
-    """작업대 위에 놓였을 때의 물체 중심 높이."""
+    """물체를 작업대 위에 올려놓았을 때 물체 중심의 높이 z [m]."""
     if spec["shape"] == "cuboid":
         half = spec["size"][2] / 2.0
     elif spec["shape"] == "cylinder":
@@ -436,10 +450,10 @@ def object_center_z(spec):
 
 
 # =============================================================================
-# 4. Scene 구성
+# 4. Scene 구성 (바닥 · 배경 · 작업대 · 조명 · 로봇 · 물체)
 # =============================================================================
 def get_assets_root_safe():
-    """Isaac Sim asset root(Nucleus 또는 S3) 를 얻는다. 실패하면 None (프로그램은 계속)."""
+    """Isaac Sim asset 저장소(Nucleus / S3) 경로를 가져온다. 실패하면 None 을 반환하고 프로그램은 계속 진행."""
     if _get_assets_root_path is None:
         log("get_assets_root_path() not importable (isaacsim.storage.native missing?).", "ERROR")
         return None
@@ -457,7 +471,7 @@ def get_assets_root_safe():
 
 
 def _prim_has_composed_children(prim):
-    """reference 가 실제로 resolve 되었는지(자식 prim 이 생겼는지) 확인."""
+    """USD reference 가 실제로 불러와졌는지(하위 prim 이 생겼는지) 확인한다."""
     try:
         return len(list(prim.GetFilteredChildren(Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)))) > 0
     except Exception:  # noqa: BLE001
@@ -465,7 +479,7 @@ def _prim_has_composed_children(prim):
 
 
 def load_franka_reference(stage, assets_root):
-    """Franka USD 를 후보 경로 순서대로 reference 해보고 성공한 경로를 반환. 모두 실패하면 None."""
+    """Franka USD 를 후보 경로 순서대로 불러와 보고, 성공한 경로를 반환한다. 모두 실패하면 None."""
     candidates = []
     if FRANKA_USD_OVERRIDE:
         candidates.append(FRANKA_USD_OVERRIDE)
@@ -495,7 +509,8 @@ def load_franka_reference(stage, assets_root):
 
 
 def setup_lights(stage):
-    """Dome light(균일 환경광) + Distant light(주광). 색 검출이 안정적이도록 과노출을 피하는 세기."""
+    """조명 = Dome light(전체를 고르게 밝힘) + Distant light(햇빛 같은 주 조명).
+    너무 밝으면 색이 날아가 검출이 불안정해지므로 적당한 세기로 둔다."""
     UsdGeom.Xform.Define(stage, "/World/Lights")
     dome = UsdLux.DomeLight.Define(stage, "/World/Lights/DomeLight")
     dome.CreateIntensityAttr(DOME_LIGHT_INTENSITY)
@@ -506,8 +521,8 @@ def setup_lights(stage):
 
 
 def create_object(world, spec, xy):
-    """OBJECT_SPECS 한 항목으로 정적(Fixed) primitive 를 만든다.
-    Fixed* 를 쓰는 이유: 중력으로 굴러가지 않고, UI 에서 gizmo 로 옮기면 그 자리에 유지됨."""
+    """OBJECT_SPECS 의 한 항목으로 고정(Fixed) 물체를 만든다.
+    Fixed 를 쓰는 이유: 중력에 굴러가지 않고, UI 에서 옮기면 그 자리에 그대로 있다."""
     name = spec["name"]
     position = np.array([xy[0], xy[1], object_center_z(spec)], dtype=float)
     kwargs = {"prim_path": f"/World/Objects/{name}", "name": name.lower(), "position": position}
@@ -538,7 +553,7 @@ def create_object(world, spec, xy):
 
 
 def _shared_surface(prim_path, color, roughness, metallic=0.0):
-    """여러 prim 이 함께 쓰는 PreviewSurface 재질 (슬래브/리브 수십 개가 재질 수십 개를 만들지 않도록)."""
+    """여러 prim 이 함께 쓰는 재질을 하나 만든다. (바닥 판 수십 개가 재질을 각각 만들지 않도록)"""
     if PreviewSurface is None:
         return None
     try:
@@ -550,7 +565,7 @@ def _shared_surface(prim_path, color, roughness, metallic=0.0):
 
 
 def _visual_box(prim_path, center, size, material, color, cast_shadows=True):
-    """충돌/물리 없는 시각용 박스 (배경 요소). cast_shadows=False 면 RTX 그림자를 만들지 않음."""
+    """충돌·물리가 없는 장식용 박스를 만든다. cast_shadows=False 면 그림자를 만들지 않는다."""
     kwargs = {"prim_path": prim_path, "name": prim_path.split("/")[-1].lower(),
               "position": np.array(center, dtype=float), "size": 1.0, "scale": np.array(size, dtype=float)}
     if material is not None:
@@ -568,7 +583,8 @@ def _visual_box(prim_path, center, size, material, color, cast_shadows=True):
 
 
 def _build_warehouse(stage):
-    """창고형 작업 현장 배경을 만들고 MDL override 용 prim 경로 그룹을 반환한다. (모두 VisualCuboid, 물리 없음)"""
+    """창고 배경을 만든다 (전부 장식용 박스, 물리 없음).
+    반환: MDL 재질을 덮어쓸 prim 경로 목록 {"floor": [...], "walls": [...]}"""
     E = "/World/Environment"
     for sub in ("", "/Floor", "/Markings", "/Walls", "/Columns", "/Roof", "/Racks", "/CameraStand"):
         UsdGeom.Xform.Define(stage, E + sub)
@@ -587,7 +603,7 @@ def _build_warehouse(stage):
     m_card = _shared_surface("/World/Looks/Cardboard", CARDBOARD_COLOR, 0.85)
     m_wood = _shared_surface("/World/Looks/PalletWood", PALLET_WOOD_COLOR, 0.8)
 
-    # (1) 콘크리트 슬래브 바닥: 2 m 패널 3가지 톤, 8 mm 줄눈(GroundPlane 색)
+    # (1) 바닥: 2 m 콘크리트 판을 3가지 톤으로 번갈아 깔고, 판 사이에 8 mm 줄눈을 둔다
     p = FLOOR_PANEL_SIZE_M
     for i in range(int(round(rx / p))):
         for j in range(int(round(ry / p))):
@@ -596,7 +612,7 @@ def _build_warehouse(stage):
                 f"{E}/Floor/Slab_{i:02d}_{j:02d}", (x0 + (i + 0.5) * p, y0 + (j + 0.5) * p, 0.002),
                 (p - 0.008, p - 0.008, 0.004), m_conc[k], FLOOR_CONCRETE_COLORS[k]))
 
-    # (2) 노란 안전선: 로봇 작업 셀 경계(작업대 + 0.6 m) + 남쪽 보행 통로 2줄
+    # (2) 노란 안전선: 로봇 작업 구역 경계(작업대 + 0.6 m 여유) + 남쪽 보행 통로 2줄
     w, zc, th = 0.10, 0.005, 0.002
     X0 = TABLE_CENTER_XY[0] - TABLE_SIZE_XY[0] / 2 - 0.6
     X1 = TABLE_CENTER_XY[0] + TABLE_SIZE_XY[0] / 2 + 0.6
@@ -608,7 +624,7 @@ def _build_warehouse(stage):
     for name, (lx, ly, sx, sy) in lines.items():
         _visual_box(f"{E}/Markings/{name}", (lx, ly, zc), (sx, sy, th), m_yellow, SAFETY_YELLOW)
 
-    # (3) 벽: 하부 콘크리트 블록(1.2 m) + 상부 골강판 + 0.6 m 간격 세로 리브. 안쪽 면 = 방 경계
+    # (3) 벽: 아래 콘크리트 블록(1.2 m) + 위 금속 골강판 + 0.6 m 간격 세로 리브. 벽 안쪽 면이 방 경계
     hb = WALL_BLOCK_HEIGHT_M
     hc = H - hb
     walls = (("North", "x", y1, 1.0), ("South", "x", y0, -1.0), ("East", "y", x1, 1.0), ("West", "y", x0, -1.0))
@@ -639,7 +655,7 @@ def _build_warehouse(stage):
             a += 0.6
             n += 1
 
-    # (4) 철골 기둥 + 노란 보호대 (벽 안쪽)
+    # (4) 철골 기둥 + 아래쪽 노란 보호대 (벽 안쪽)
     cols = [(min(max(x0 + 4.0 * k, x0 + 0.25), x1 - 0.25), y1 - 0.25) for k in range(5)]
     cols += [(min(max(x0 + 4.0 * k, x0 + 0.25), x1 - 0.25), y0 + 0.25) for k in range(5)]
     cols += [(x1 - 0.25, y0 + 3.5 * k) for k in range(1, 4)] + [(x0 + 0.25, y0 + 3.5 * k) for k in range(1, 4)]
@@ -647,7 +663,7 @@ def _build_warehouse(stage):
         _visual_box(f"{E}/Columns/Column_{n:02d}", (px, py, H / 2), (0.30, 0.30, H), m_dark, STEEL_DARK_COLOR)
         _visual_box(f"{E}/Columns/Guard_{n:02d}", (px, py, 0.5), (0.38, 0.38, 1.0), m_yellow, SAFETY_YELLOW)
 
-    # (5) 개방형 지붕 트러스 (지붕 패널 없음 -> 조명 유지, 그림자도 만들지 않음)
+    # (5) 지붕 트러스: 지붕 판은 두지 않고(조명을 가리지 않도록), 그림자도 만들지 않음
     for n, (px, _) in enumerate(cols[:5]):
         _visual_box(f"{E}/Roof/Truss_{n}", (px, cy, H - 0.2), (0.25, ry, 0.40), m_dark, STEEL_DARK_COLOR,
                     cast_shadows=False)
@@ -655,7 +671,7 @@ def _build_warehouse(stage):
         _visual_box(f"{E}/Roof/Purlin_{n}", (cx, py, H - 0.05), (rx, 0.15, 0.20), m_dark, STEEL_DARK_COLOR,
                     cast_shadows=False)
 
-    # (6) 파렛트 랙 (북쪽 벽): 4 bay x 3 단, 아연도금 기둥 + 노란 빔 + 나무 파렛트 + 골판지 박스
+    # (6) 파렛트 랙 (북쪽 벽): 4칸 x 3단, 아연도금 기둥 + 노란 빔 + 나무 파렛트 + 골판지 상자
     yf, yb = y1 - 1.6, y1 - 0.5
     bay_w, levels, rack_h = 2.7, (0.12, 1.65, 3.20), 4.6
     rack_x0 = cx - 6.4
@@ -682,13 +698,13 @@ def _build_warehouse(stage):
                             m_card, CARDBOARD_COLOR)
                 n += 1
 
-    # (7) 바닥에 쌓인 파렛트 (동쪽 벽 근처)
+    # (7) 바닥에 놓인 파렛트 + 상자 (동쪽 벽 근처)
     for n, py in enumerate((cy - 3.0, cy + 3.0)):
         px = x1 - 1.4
         _visual_box(f"{E}/Racks/FloorPallet_{n}", (px, py, 0.07), (1.2, 1.0, 0.14), m_wood, PALLET_WOOD_COLOR)
         _visual_box(f"{E}/Racks/FloorBox_{n}", (px, py, 0.14 + 0.45), (1.1, 0.9, 0.9), m_card, CARDBOARD_COLOR)
 
-    # (8) 고정 카메라 스탠드 (카메라 바로 아래 기둥. 카메라 시야(아래쪽 최대 ~50도) 밖이라 영상에 찍히지 않음)
+    # (8) 카메라 스탠드: 카메라 바로 아래의 기둥 (카메라는 아래로 최대 약 50° 까지만 보므로 영상에 찍히지 않음)
     cam_x, cam_y, cam_z = CAMERA_POSITION
     _visual_box(f"{E}/CameraStand/BasePlate", (cam_x, cam_y, 0.01), (0.45, 0.45, 0.02), m_dark, STEEL_DARK_COLOR)
     pole_h = cam_z - 0.12 - 0.02
@@ -698,10 +714,10 @@ def _build_warehouse(stage):
 
 
 def setup_environment(world, stage):
-    """넓은 바닥(GroundPlane, collider) + 창고형 작업 현장 배경.
-    배경은 VisualCuboid(물리 없음)이며 센서 판단 로직과 무관하다. 장식 생성이 실패해도 바닥만으로 계속 진행.
-    반환: MDL override 용 prim 경로 그룹 {"floor": [...], "walls": [...]}"""
-    # (1) 넓은 바닥: asset 다운로드가 필요 없는 로컬 GroundPlane (물리 바닥 역할)
+    """바닥(충돌체 있음)과 창고 배경을 만든다.
+    배경은 장식일 뿐 판정과 무관하며, 만들다 실패해도 바닥만으로 계속 진행한다.
+    반환: MDL 재질을 덮어쓸 prim 경로 목록 {"floor": [...], "walls": [...]}"""
+    # (1) 넓은 바닥: 별도 다운로드 없이 만드는 GroundPlane (물리 바닥 역할)
     try:
         if GroundPlane is None:
             raise ImportError("GroundPlane class not available")
@@ -727,9 +743,9 @@ def setup_environment(world, stage):
 
 
 def setup_workbench(world, stage):
-    """철제 작업대: 상판(FixedCuboid, collider, 윗면 = TABLE_TOP_Z) + 다리/하부 프레임 + 노란 테두리 띠.
-    판단에 쓰이는 것은 TABLE_TOP_Z / TABLE_CENTER_XY / TABLE_SIZE_XY 상수뿐이며 외형은 영향 없음.
-    반환: 상판 prim 경로 (MDL override 용)"""
+    """철제 작업대를 만든다: 상판(충돌체, 윗면 높이 = TABLE_TOP_Z) + 다리·프레임 + 노란 테두리.
+    판정에 쓰이는 것은 TABLE_TOP_Z / TABLE_CENTER_XY / TABLE_SIZE_XY 상수뿐이고, 외형은 결과에 영향이 없다.
+    반환: 상판 prim 경로 (MDL 재질 덮어쓰기용)"""
     W = "/World/Workbench"
     UsdGeom.Xform.Define(stage, W)
     tx, ty = TABLE_CENTER_XY
@@ -756,7 +772,7 @@ def setup_workbench(world, stage):
             _visual_box(f"{W}/RailX_{j}", (tx, ly, 0.12), (sx - 0.24, 0.06, 0.06), m_galv, STEEL_GALV_COLOR)
         for i, lx in enumerate(xs):
             _visual_box(f"{W}/RailY_{i}", (lx, ty, 0.12), (0.06, sy - 0.24, 0.06), m_galv, STEEL_GALV_COLOR)
-        # 상판 옆면의 노란 테두리 띠 (윗면보다 1 cm 아래까지만 -> 작업 표면 높이에 영향 없음)
+        # 상판 옆면의 노란 테두리 (윗면보다 1 cm 낮게 끝나므로 작업 표면 높이에는 영향 없음)
         ez = zt - pt / 2
         edges = {"S": ((tx, ty - sy / 2 - 0.003, ez), (sx, 0.006, 0.04)),
                  "N": ((tx, ty + sy / 2 + 0.003, ez), (sx, 0.006, 0.04)),
@@ -770,8 +786,8 @@ def setup_workbench(world, stage):
 
 
 def apply_mdl_overrides(groups):
-    """MDL_OVERRIDES 에 URL 이 지정된 그룹에만 실제 텍스처 재질(MDL)을 입힌다 (기본: 사용 안 함).
-    Kit 명령 CreateMdlMaterialPrim / BindMaterial 사용. 실패하면 PreviewSurface 외형을 그대로 유지."""
+    """MDL_OVERRIDES 에 URL 을 넣은 그룹에만 실제 텍스처 재질(MDL)을 입힌다 (기본: 사용 안 함).
+    실패하면 기본 재질을 그대로 유지한다."""
     for key, url in MDL_OVERRIDES.items():
         if not url or not groups.get(key):
             continue
@@ -788,7 +804,7 @@ def apply_mdl_overrides(groups):
 
 
 def setup_scene(world):
-    """Ground / 배경 / 작업대 / Light / Franka / 물체 3개 를 생성하고 handle 들을 dict 로 반환."""
+    """바닥 · 배경 · 작업대 · 조명 · Franka · 물체 3개를 만들고, 이후에 쓸 핸들을 dict 로 반환한다."""
     stage = get_current_stage()
     UsdGeom.Xform.Define(stage, "/World")
     UsdGeom.Xform.Define(stage, "/World/Objects")
@@ -796,17 +812,18 @@ def setup_scene(world):
     scene = {"objects": {}, "articulation": None, "robot_xform": None,
              "robot_usd": None, "robot_is_placeholder": False}
 
-    # (1) 넓은 바닥 + 창고형 배경
+    # (1) 바닥 + 창고 배경
     groups = setup_environment(world, stage)
 
-    # (2) 작업대 (윗면 높이 TABLE_TOP_Z)
+    # (2) 작업대 (윗면 높이 = TABLE_TOP_Z)
     groups["workbench_top"] = [setup_workbench(world, stage)]
     apply_mdl_overrides(groups)
 
-    # (3) Lights
+    # (3) 조명
     setup_lights(stage)
 
-    # (4) Robot (Franka). 실패 시 placeholder base 로 계속 진행 (좌표변환 파이프라인 확인 가능)
+    # (4) 로봇 (Franka). 불러오기에 실패하면 회색 원기둥으로 대신하고 계속 진행
+    #     (좌표 변환과 거리 계산은 그대로 확인할 수 있음)
     assets_root = get_assets_root_safe()
     usd = load_franka_reference(stage, assets_root)
     if usd is None:
@@ -818,7 +835,7 @@ def setup_scene(world):
         log("Using a PLACEHOLDER robot base (gray cylinder). Distances are still computed in its base frame.",
             "ERROR")
     scene["robot_usd"] = usd
-    # robot base frame = ROBOT_PRIM_PATH prim 의 frame (Franka 의 panda_link0 가 이 원점에 위치)
+    # 로봇 base 좌표계 = ROBOT_PRIM_PATH prim 의 좌표계 (Franka 의 panda_link0 가 이 원점에 있음)
     scene["robot_xform"] = SingleXFormPrim(prim_path=ROBOT_PRIM_PATH, name="robot_base_frame",
                                            position=np.array(ROBOT_INITIAL_POSITION, dtype=float),
                                            orientation=yaw_to_quat_wxyz(ROBOT_INITIAL_YAW_DEG))
@@ -830,14 +847,14 @@ def setup_scene(world):
         except Exception as e:  # noqa: BLE001
             log(f"SingleArticulation wrap failed ({e}); robot will stay in its default pose.", "WARN")
 
-    # (5) Objects
+    # (5) 물체
     for spec in OBJECT_SPECS:
         scene["objects"][spec["name"]] = create_object(world, spec, OBJECT_INITIAL_POSITIONS[spec["name"]])
     return scene
 
 
 def apply_robot_home(scene):
-    """world.reset() 이후 Franka 를 대기 자세로 둔다 (화면 구성용, 판단과 무관)."""
+    """world.reset() 후 Franka 를 대기 자세로 둔다 (화면 구성용, 판정과 무관)."""
     art = scene.get("articulation")
     if art is None or not ROBOT_HOME_JOINTS or ArticulationAction is None:
         return
@@ -853,7 +870,7 @@ def apply_robot_home(scene):
 
 
 def apply_scenario(scene, name):
-    """시나리오 preset 을 '한 번만' 적용 (사용자가 키를 눌렀을 때). 매 frame 호출하지 않는다."""
+    """물체들을 시나리오 프리셋 위치로 한 번 옮긴다. (사용자가 시나리오를 바꿀 때만 호출, 매 frame 호출 X)"""
     preset = SCENARIO_PRESETS[name]
     for spec in OBJECT_SPECS:
         obj = scene["objects"][spec["name"]]
@@ -861,16 +878,16 @@ def apply_scenario(scene, name):
         pos = np.array([xy[0], xy[1], object_center_z(spec)], dtype=float)
         obj.set_world_pose(position=pos)
         try:
-            obj.set_default_state(position=pos)     # Stop->Play(reset) 시에도 이 배치를 유지
+            obj.set_default_state(position=pos)     # Stop → Play 로 reset 해도 이 위치가 유지되도록
         except Exception:  # noqa: BLE001
             pass
     log(f"Scenario {name} applied once. Objects can now be moved freely in the UI.")
 
 
 def validate_scene_layout(camera, scene):
-    """시작 시 1회 실행하는 배치 점검 (경고만 출력, 판단 로직과 무관).
-    - A/B/C preset 의 모든 객체 footprint 가 작업대 위에 있는지
-    - 각 객체 중심과 Franka(base / 대기 자세 상단 근사점)가 카메라 화면 안으로 투영되는지"""
+    """시작할 때 한 번 배치를 점검하고, 문제가 있으면 경고만 출력한다 (판정과 무관).
+    - 모든 시나리오(A/B/C)의 물체가 작업대 위에 완전히 올라가 있는가?
+    - 각 물체 중심과 Franka(base, 몸체 윗부분 근사점)가 카메라 화면 안에 보이는가?"""
     K, _ = get_intrinsics(camera)
     t_wc, R_wc, _ = get_camera_pose_ros(camera)
     t_wr, _ = get_robot_base_pose(scene)
@@ -878,6 +895,7 @@ def validate_scene_layout(camera, scene):
     tx0, tx1 = TABLE_CENTER_XY[0] - TABLE_SIZE_XY[0] / 2, TABLE_CENTER_XY[0] + TABLE_SIZE_XY[0] / 2
     ty0, ty1 = TABLE_CENTER_XY[1] - TABLE_SIZE_XY[1] / 2, TABLE_CENTER_XY[1] + TABLE_SIZE_XY[1] / 2
 
+    # world 점 p 를 카메라 영상에 투영했을 때 화면 안에 들어오는지
     def in_view(p):
         pc = R_wc.T @ (np.asarray(p, dtype=float) - t_wc)
         if pc[2] <= 0:
@@ -905,13 +923,12 @@ def validate_scene_layout(camera, scene):
 
 
 # =============================================================================
-# 5. Camera
+# 5. 카메라
 # =============================================================================
 def setup_camera():
-    """외부 고정형 RGB-D 카메라 (eye-to-hand).
-    - pose 는 여기서 '한 번만' 설정하며 매 frame 다시 설정하지 않는다.
-    - intrinsics 가 일관되도록 USD focalLength/aperture 를 명시적으로 설정한다
-      (verticalAperture = horizontalAperture * H / W  -> 정사각 pixel, fx == fy)."""
+    """로봇 밖에 고정된 RGB-D 카메라를 만든다 (eye-to-hand).
+    - 위치/방향은 여기서 한 번만 정하고, 이후에는 바꾸지 않는다.
+    - 세로 센서 크기 = 가로 센서 크기 × (세로 해상도 / 가로 해상도) 로 맞춰서 fx == fy 가 되게 한다."""
     w, h = CAMERA_RESOLUTION
     kwargs = {"prim_path": CAMERA_PRIM_PATH, "name": "rgbd_camera",
               "position": np.array(CAMERA_POSITION, dtype=float), "resolution": (w, h)}
@@ -928,14 +945,15 @@ def setup_camera():
     usd_cam.GetVerticalApertureAttr().Set(float(CAMERA_HORIZONTAL_APERTURE_MM * h / w))
     usd_cam.GetClippingRangeAttr().Set(Gf.Vec2f(*CAMERA_CLIPPING_RANGE))
 
-    # look-at 회전을 USD 카메라 축 규약으로 계산해 그대로 넣는다 (camera_axes="usd": 변환 없음)
+    # 바라보는 방향을 USD 카메라 축 기준으로 계산했으므로 camera_axes="usd" 로 그대로 넣는다
     q_usd = look_at_quat_usd(CAMERA_POSITION, CAMERA_TARGET)
     camera.set_world_pose(position=np.array(CAMERA_POSITION, dtype=float), orientation=q_usd, camera_axes="usd")
     return camera
 
 
 def get_intrinsics(camera):
-    """K = [[fx,0,cx],[0,fy,cy],[0,0,1]] [px].  공식 API 우선, 실패 시 USD 속성에서 계산."""
+    """카메라 내부 파라미터 K = [[fx, 0, cx], [0, fy, cy], [0, 0, 1]] (단위 px) 를 구한다.
+    공식 API 를 먼저 쓰고, 실패하면 USD 속성값(초점거리, 센서 크기)으로 직접 계산한다."""
     try:
         K = np.asarray(camera.get_intrinsics_matrix(), dtype=float)
         if K.shape == (3, 3) and K[0, 0] > 0 and K[1, 1] > 0:
@@ -952,8 +970,10 @@ def get_intrinsics(camera):
 
 
 def get_camera_pose_ros(camera):
-    """카메라 pose 를 ROS optical frame 규약으로 반환: p_world = R_wc @ p_cam + t_wc.
-    ROS optical frame: x = 화면 오른쪽, y = 화면 아래, z = 광축(앞) -> depth(Z) 와 같은 축."""
+    """카메라 위치/방향을 ROS optical 축 기준으로 반환한다.   p_world = R_wc @ p_cam + t_wc
+
+    ROS optical 축: x = 화면 오른쪽, y = 화면 아래, z = 카메라가 보는 방향 (= depth 값의 방향)
+    반환: (t_wc, R_wc, 사용한 방법 설명)"""
     try:
         pos, quat = camera.get_world_pose(camera_axes="ros")
         return np.asarray(pos, dtype=float).reshape(3), quat_wxyz_to_rotmat(quat), \
@@ -963,36 +983,40 @@ def get_camera_pose_ros(camera):
     prim = get_current_stage().GetPrimAtPath(CAMERA_PRIM_PATH)
     m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
     M = np.array([[m[i][j] for j in range(4)] for i in range(4)], dtype=float)
-    # Gf 행렬은 row-vector 규약 (p_world_row = p_local_row @ M) -> R = M[:3,:3]^T, t = M[3,:3]
+    # USD(Gf) 행렬은 행벡터 규약 (p_world = p_local @ M) → 회전 R = M[:3,:3] 의 전치, 위치 t = M[3,:3]
     R_usd = M[:3, :3].T
     R_usd = R_usd / np.linalg.norm(R_usd, axis=0, keepdims=True)
-    R_ros = R_usd @ np.diag([1.0, -1.0, -1.0])     # USD cam(x right, y up, z back) -> ROS(x right, y down, z fwd)
+    R_ros = R_usd @ np.diag([1.0, -1.0, -1.0])     # USD 축(y 위, z 뒤) → ROS 축(y 아래, z 앞): y, z 부호만 반전
     return M[3, :3].copy(), R_ros, "USD ComputeLocalToWorldTransform (fallback)"
 
 
 def get_robot_base_pose(scene):
-    """T_world_robot (robot base frame -> world) 를 stage 에서 현재 값으로 읽는다.
-    반환 (t_wr, R_wr): p_world = R_wr @ p_robot + t_wr."""
+    """현재 로봇 base 의 위치/방향을 stage 에서 읽는다.
+    반환 (t_wr, R_wr): '로봇 좌표 → world 좌표' 변환.   p_world = R_wr @ p_robot + t_wr"""
     pos, quat = scene["robot_xform"].get_world_pose()
     return np.asarray(pos, dtype=float).reshape(3), quat_wxyz_to_rotmat(quat)
 
 
-# ★★★----------------------------------------------------------------------
-# ★ [CORE-1] 동기화: RGB(t) 와 Depth(t) 를 같은 카메라 / 같은 frame 에서 획득
-# ★★★----------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# ★ [CORE-1] 같은 frame 의 RGB 와 Depth 를 함께 가져오기 (센서 동기화)
+# ─────────────────────────────────────────────────────────────────────────────
 def acquire_rgbd_frame(camera):
-    """같은 카메라 render product 의 RGB 와 Depth 를 '같은 frame' 으로 함께 가져온다.
+    """같은 카메라에서 같은 순간에 찍힌 RGB 와 Depth 를 함께 가져온다.
 
-    1순위: camera.get_current_frame()  -> 하나의 dict 안에 'rgba' 와 'distance_to_image_plane' 이
-           같은 data-acquisition 시점(rendering_frame / rendering_time)에 함께 저장된다.
-    2순위: get_rgba()/get_depth() 개별 getter (같은 world.step() 직후 호출이므로 같은 render 결과).
+    가져오는 방법 (위에서부터 시도):
+      1) camera.get_current_frame() : RGB 와 Depth 가 같은 렌더링 시점으로 한 dict 에 담겨 온다.
+      2) get_rgba() / get_depth()   : 따로 가져오지만, 같은 world.step() 직후라 같은 렌더링 결과다.
 
-    Depth 의미: distance_to_image_plane = 카메라 광축 방향 Z depth [m] (image plane 까지의 수직거리).
-                distance_to_camera (광학 중심까지의 Euclidean range) 가 아님!
-    반환: dict 또는 None(아직 버퍼가 비어 있음)."""
+    Depth 의 의미 (중요):
+      distance_to_image_plane = 카메라가 보는 방향(광축)으로 잰 거리 Z [m]
+      ※ 렌즈 중심까지의 직선거리(distance_to_camera)가 아니다.
+
+    반환: {"rgb", "depth", "rendering_frame", "rendering_time", "source"}
+          카메라 버퍼가 아직 비어 있으면 None"""
     rgba = depth = None
     rframe = rtime = None
     source = "camera.get_current_frame()"
+    # 1) 한 번에 가져오기
     try:
         frame = camera.get_current_frame()
     except Exception as e:  # noqa: BLE001
@@ -1003,6 +1027,7 @@ def acquire_rgbd_frame(camera):
         depth = frame.get("distance_to_image_plane")
         rframe = frame.get("rendering_frame")
         rtime = frame.get("rendering_time")
+    # 2) 빠진 것이 있으면 개별로 가져오기
     if rgba is None or np.asarray(rgba).size == 0:
         try:
             rgba = camera.get_rgba()
@@ -1021,23 +1046,24 @@ def acquire_rgbd_frame(camera):
     depth = np.asarray(depth, dtype=np.float32)
     if rgba.ndim != 3 or rgba.shape[2] < 3 or rgba.size == 0 or depth.size == 0:
         return None
-    if depth.ndim == 3:
+    if depth.ndim == 3:                         # (H, W, 1) → (H, W)
         depth = depth[..., 0]
     if depth.shape[:2] != rgba.shape[:2]:
         RL.warn("shape", f"RGB {rgba.shape} and depth {depth.shape} sizes differ; skipping frame")
         return None
-    rgb = rgba[..., :3]
-    if rgb.dtype != np.uint8:
+    rgb = rgba[..., :3]                         # RGBA → RGB (알파 채널 제거)
+    if rgb.dtype != np.uint8:                   # 0~1 float 이면 0~255 정수로 변환
         rgb = np.clip(rgb * (255.0 if float(np.nanmax(rgb)) <= 1.0 else 1.0), 0, 255).astype(np.uint8)
     return {"rgb": np.array(rgb, copy=True), "depth": np.array(depth, copy=True),
             "rendering_frame": rframe, "rendering_time": rtime, "source": source}
 
 
 # =============================================================================
-# 6. RGB 처리: 색상 기반 객체 검출 (WHAT)
+# 6. RGB 처리: 색으로 물체 찾기 (WHAT — 무엇인가?)
 # =============================================================================
 def rgb_to_hsv_cv_scale(rgb):
-    """RGB uint8 -> HSV (OpenCV 스케일 H 0-179, S/V 0-255). OpenCV 없으면 numpy 로 동일 계산."""
+    """RGB 이미지 → HSV 이미지 (OpenCV 범위: H 0~179, S·V 0~255).
+    OpenCV 가 없으면 numpy 로 같은 계산을 한다."""
     if cv2 is not None:
         return cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2HSV)
     x = rgb.astype(np.float32) / 255.0
@@ -1054,7 +1080,7 @@ def rgb_to_hsv_cv_scale(rgb):
 
 
 def _largest_component(mask):
-    """작은 노이즈 제거 후 가장 큰 연결 영역만 남긴다 (OpenCV 없으면 mask 그대로)."""
+    """작은 노이즈를 지운 뒤 가장 큰 덩어리 하나만 남긴다. (OpenCV 가 없으면 mask 를 그대로 반환)"""
     if cv2 is None or not mask.any():
         return mask
     m = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
@@ -1065,19 +1091,29 @@ def _largest_component(mask):
     return labels == idx
 
 
-# ★★★----------------------------------------------------------------------
-# ★ [CORE-2] RGB 센서 역할 (WHAT): 색으로 객체 identity / TARGET 여부 / mask 결정
-# ★★★----------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# ★ [CORE-2] RGB 의 역할 (WHAT): 색으로 물체를 구분하고, Target 여부와 mask 를 정한다
+# ─────────────────────────────────────────────────────────────────────────────
 def detect_objects_rgb(rgb, object_specs):
-    """RGB 영상에서 각 객체를 HSV threshold 로 검출한다.
-    반환: {name: {name, role, visual, detected, pixel_count, mask, bbox(x0,y0,x1,y1), centroid(u,v), det_reason}}
-    pixel 좌표: u = 열(오른쪽 +), v = 행(아래 +), 원점 = 좌상단. centroid 는 pixel 중심(+0.5) 기준.
-    ※ 나중에 YOLO 등으로 교체하려면 이 함수만 같은 반환 형식으로 바꾸면 된다."""
+    """RGB 영상에서 각 물체를 색(HSV 범위)으로 찾는다.
+
+    반환: {물체 이름: 검출 결과}.  검출 결과의 주요 항목:
+      detected    찾았는가 (True / False)
+      role        "TARGET" / "NON_TARGET"
+      pixel_count 물체로 판정된 pixel 수
+      mask        물체 pixel 위치 (True/False 2D 배열)
+      bbox        물체를 감싸는 사각형 (x0, y0, x1, y1)
+      centroid    물체 중심 pixel (u, v)
+      det_reason  못 찾았을 때 그 이유
+
+    pixel 좌표: 원점은 왼쪽 위, u 는 오른쪽(+), v 는 아래쪽(+).
+    ※ 나중에 YOLO 같은 검출기로 바꾸려면, 반환 형식만 맞춰서 이 함수만 교체하면 된다."""
     hsv = rgb_to_hsv_cv_scale(rgb)
     H, S, V = hsv[..., 0], hsv[..., 1], hsv[..., 2]
     out = {}
     for spec in object_specs:
         name = spec["name"]
+        # 이 물체 색의 HSV 범위에 들어가는 pixel 을 모두 True 로 표시
         mask = np.zeros(H.shape, dtype=bool)
         for lo, hi in COLOR_RANGES[spec["color_key"]]:
             mask |= ((H >= lo[0]) & (H <= hi[0]) & (S >= lo[1]) & (S <= hi[1]) & (V >= lo[2]) & (V <= hi[2]))
@@ -1091,6 +1127,7 @@ def detect_objects_rgb(rgb, object_specs):
             det["det_reason"] = f"mask too small ({count} < {MIN_MASK_PIXELS} px)"
         else:
             ys, xs = np.nonzero(mask)
+            # centroid 에 +0.5: pixel 의 왼쪽 위 모서리가 아니라 pixel 중심을 기준으로 함
             det.update(detected=True, mask=mask, det_reason="ok",
                        bbox=(int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())),
                        centroid=(float(xs.mean()) + 0.5, float(ys.mean()) + 0.5))
@@ -1099,19 +1136,25 @@ def detect_objects_rgb(rgb, object_specs):
 
 
 # =============================================================================
-# 7. Depth 처리: RGB mask 가 고른 pixel 의 depth 만 사용 (WHERE)
+# 7. Depth 처리: RGB 가 고른 pixel 의 depth 만 사용 (WHERE — 어디에 있나?)
 # =============================================================================
-# ★★★----------------------------------------------------------------------
-# ★ [CORE-3] 센서 융합 지점: RGB mask 가 어떤 Depth pixel 을 쓸지 결정 (전체 최소 depth 사용 X)
-# ★★★----------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# ★ [CORE-3] 센서 융합 지점: RGB mask 로 Depth 영상에서 쓸 pixel 을 고른다
+#            (화면 전체에서 가장 가까운 depth 를 쓰는 것이 아님)
+# ─────────────────────────────────────────────────────────────────────────────
 def extract_object_depth(depth, mask):
-    """객체 mask 내부의 valid depth (finite, >0, <DEPTH_MAX_VALID_M) 의 median 을 구한다.
-    bbox 전체가 아니라 mask 내부만 쓰므로 배경 depth 가 섞이지 않는다.
-    반환: {depth_valid, depth_median[m], depth_valid_count, depth_reason}"""
+    """물체 mask 안쪽 pixel 들의 depth 중앙값(median)을 구한다.
+
+    - 사각형(bbox) 전체가 아니라 mask 안쪽만 쓰므로 배경 depth 가 섞이지 않는다.
+    - 무효값(NaN, Inf, 0, DEPTH_MAX_VALID_M 보다 먼 값)은 뺀다.
+    - 평균 대신 중앙값을 써서 튀는 값의 영향을 줄인다.
+
+    반환: {depth_valid, depth_median [m], depth_valid_count, depth_reason}"""
     res = {"depth_valid": False, "depth_median": None, "depth_valid_count": 0, "depth_reason": ""}
     if mask is None:
         res["depth_reason"] = "no RGB mask"
         return res
+    # mask 가장자리를 1px 깎아 경계의 배경 depth 를 뺀다 (깎은 뒤 너무 작아지면 원래 mask 사용)
     use_mask = mask
     if DEPTH_ERODE_MASK and cv2 is not None:
         eroded = cv2.erode(mask.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(bool)
@@ -1129,20 +1172,26 @@ def extract_object_depth(depth, mask):
 
 
 # =============================================================================
-# 8. (u, v, Z) -> 3D : camera frame / world frame
+# 8. pixel (u, v) + depth Z → 3D 위치 (카메라 좌표 / world 좌표)
 # =============================================================================
-# ★★★----------------------------------------------------------------------
-# ★ [CORE-4] Depth 센서 역할 (WHERE): (u, v, Z) -> camera frame -> world 3D 위치
-# ★★★----------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# ★ [CORE-4] Depth 의 역할 (WHERE): pixel (u, v) + depth Z → 3D 위치
+# ─────────────────────────────────────────────────────────────────────────────
 def pixel_depth_to_3d(camera, u, v, z, K, cam_pose):
-    """pixel (u,v) 와 Z depth(distance_to_image_plane) 로 3D 점을 계산한다.
+    """pixel (u, v) 와 depth Z 로 3D 위치를 계산한다.
 
-    camera frame = ROS optical (x 오른쪽, y 아래, z 광축 앞). distance_to_image_plane 은 정확히 이 z 값이므로
-        X = (u - cx) * Z / fx,  Y = (v - cy) * Z / fy,  Z = depth
-    가 성립한다 (Euclidean range 인 distance_to_camera 였다면 이 식은 틀림).
+    1) 카메라 좌표 (ROS optical: x 오른쪽, y 아래, z 앞)
+           X = (u - cx) * Z / fx
+           Y = (v - cy) * Z / fy
+           Z = depth
+       ※ depth 가 광축 방향 거리(distance_to_image_plane)라서 이 식이 그대로 성립한다.
+         (렌즈 중심까지의 직선거리였다면 이 식은 틀림)
 
-    world 점은 공식 helper Camera.get_world_points_from_image_coords() 를 우선 사용하고,
-    직접 계산값 (R_wc @ p_cam + t_wc) 과 비교해 좌표 규약이 일치하는지 매번 검증한다."""
+    2) world 좌표
+       Isaac Sim 공식 함수 get_world_points_from_image_coords() 의 결과를 쓰고,
+       직접 계산한 값(R_wc @ p_cam + t_wc)과 비교해 좌표 규약이 맞는지 매번 확인한다.
+
+    반환: {p_cam, p_world, unproj_method ("official" / "manual"), unproj_check_m (두 계산의 차이 [m])}"""
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     p_cam = np.array([(u - cx) * z / fx, (v - cy) * z / fy, z], dtype=float)
     t_wc, R_wc, _ = cam_pose
@@ -1167,25 +1216,35 @@ def pixel_depth_to_3d(camera, u, v, z, K, cam_pose):
 
 
 # =============================================================================
-# 9. World -> Robot base frame
+# 9. world 좌표 → 로봇 base 좌표
 # =============================================================================
-# ★★★----------------------------------------------------------------------
-# ★ [CORE-5] 좌표변환: world -> robot base (Camera depth 를 robot 거리로 그대로 쓰지 않음)
-# ★★★----------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# ★ [CORE-5] 좌표 변환: world → 로봇 base
+#            (카메라 depth 는 '카메라~물체' 거리이므로, 로봇까지의 거리로 그대로 쓰면 안 된다)
+# ─────────────────────────────────────────────────────────────────────────────
 def world_to_robot_base(p_world, t_wr, R_wr):
-    """T_world_robot = [R_wr | t_wr] 은 robot 좌표 -> world 좌표 변환 (p_w = R_wr p_r + t_wr).
-    우리가 필요한 것은 역변환 T_robot_world:  p_r = R_wr^T (p_w - t_wr)."""
+    """world 좌표의 점을 로봇 base 좌표로 바꾼다.
+
+    (t_wr, R_wr) 은 '로봇 → world' 변환이다:    p_world = R_wr @ p_robot + t_wr
+    여기서는 반대 방향이 필요하므로 역변환을 쓴다:  p_robot = R_wr^T @ (p_world - t_wr)"""
     return R_wr.T @ (np.asarray(p_world, dtype=float) - t_wr)
 
 
 # =============================================================================
-# 10. Reachability 판단 (Target 기준 FINAL)
+# 10. 작업 반경 판정 (최종 결과는 Target 하나로 결정)
 # =============================================================================
-# ★★★----------------------------------------------------------------------
-# ★ [CORE-6] 최종 판단: 3D Euclidean distance <= MAX_REACH_M -> Target 기준 FINAL
-# ★★★----------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# ★ [CORE-6] 최종 판정: 로봇 base 에서 Target 까지의 3D 거리 ≤ MAX_REACH_M ?
+# ─────────────────────────────────────────────────────────────────────────────
 def evaluate_reachability(results, max_reach):
-    """각 객체에 IN / OUT / N/A 를 붙이고, FINAL 은 Target 객체만으로 결정한다."""
+    """모든 물체에 IN / OUT / N/A 를 붙이고, 최종 결과(FINAL)는 Target 만 보고 정한다.
+
+    FINAL status 종류:
+      REACHABLE RANGE       Target 거리 ≤ max_reach
+      OUT OF RANGE          Target 거리 > max_reach
+      TARGET NOT DETECTED   RGB 에서 Target 을 찾지 못함
+      TARGET DEPTH INVALID  Target 은 찾았지만 유효한 depth 가 부족함
+      TARGET NOT DEFINED    TARGET_NAME 이 OBJECT_SPECS 에 없음"""
     for r in results:
         d = r.get("robot_dist")
         r["range_status"] = "N/A" if d is None else ("IN" if d <= max_reach else "OUT")
@@ -1205,15 +1264,17 @@ def evaluate_reachability(results, max_reach):
 
 
 # =============================================================================
-# 11. 단일 센서 비교 (RGB only / Depth only)
+# 11. 비교용: 센서를 하나만 쓰면? (RGB only / Depth only)
 # =============================================================================
-# ★★★----------------------------------------------------------------------
-# ★ [CORE-8] 단일 센서 비교: Depth-only 는 거리만 알고 identity 를 모름
-# ★★★----------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# ★ [CORE-8] 비교용 Depth only: 거리는 알지만, 그게 어떤 물체인지는 모른다
+# ─────────────────────────────────────────────────────────────────────────────
 def depth_only_baseline(depth, K, cam_pose, robot_pose, max_reach):
-    """Depth 만 사용: 작업대 위로 솟은 표면 중 카메라에 가장 가까운 점을 찾는다.
-    (작업대 높이/범위, robot base 위치는 scene 보정 정보이며 RGB 는 전혀 사용하지 않음.)
-    -> 거리는 알 수 있지만 그것이 어떤 물체(Target?)인지는 알 수 없다."""
+    """Depth 만 사용해, 작업대 위로 솟은 표면 중 카메라에 가장 가까운 점을 찾는다.
+
+    - RGB 는 전혀 쓰지 않는다. (작업대 높이·범위, 로봇 위치 같은 scene 정보만 사용)
+    - 거리는 알 수 있지만, 그 점이 어떤 물체인지(Target 인지)는 알 수 없다.
+    - naive_status: "가장 가까운 물체 = Target" 이라고 가정했을 때의 판정 결과"""
     t_wc, R_wc, _ = cam_pose
     t_wr, R_wr = robot_pose
     h, w = depth.shape
@@ -1226,17 +1287,19 @@ def depth_only_baseline(depth, K, cam_pose, robot_pose, max_reach):
     u = us[valid].astype(float) + 0.5
     v = vs[valid].astype(float) + 0.5
     z = z[valid].astype(float)
+    # 유효한 모든 pixel 을 3D world 점으로 변환
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     pc = np.stack([(u - cx) * z / fx, (v - cy) * z / fy, z], axis=1)
     pw = pc @ R_wc.T + t_wc
     tx0, tx1 = TABLE_CENTER_XY[0] - TABLE_SIZE_XY[0] / 2, TABLE_CENTER_XY[0] + TABLE_SIZE_XY[0] / 2
     ty0, ty1 = TABLE_CENTER_XY[1] - TABLE_SIZE_XY[1] / 2, TABLE_CENTER_XY[1] + TABLE_SIZE_XY[1] / 2
+    # 물체 후보: 작업대 위 일정 높이 범위 + 작업대 영역 안 + 로봇 몸체 근처는 제외
     m = ((pw[:, 2] > TABLE_TOP_Z + DEPTH_ONLY_HEIGHT_BAND[0]) & (pw[:, 2] < TABLE_TOP_Z + DEPTH_ONLY_HEIGHT_BAND[1])
          & (pw[:, 0] > tx0) & (pw[:, 0] < tx1) & (pw[:, 1] > ty0) & (pw[:, 1] < ty1)
          & (np.hypot(pw[:, 0] - t_wr[0], pw[:, 1] - t_wr[1]) > DEPTH_ONLY_ROBOT_EXCLUSION_RADIUS))
     if not m.any():
         return out
-    idx = np.flatnonzero(m)[int(np.argmin(z[m]))]
+    idx = np.flatnonzero(m)[int(np.argmin(z[m]))]          # 후보 중 카메라에 가장 가까운 점
     p_r = world_to_robot_base(pw[idx], t_wr, R_wr)
     dist = float(np.linalg.norm(p_r))
     out.update(available=True, nearest_depth=float(z[idx]), pixel=(float(u[idx]), float(v[idx])),
@@ -1244,13 +1307,16 @@ def depth_only_baseline(depth, K, cam_pose, robot_pose, max_reach):
     return out
 
 
+# 센서 하나만 썼을 때의 결과를 만들어 융합 결과와 비교한다.
+#   - RGB only  : Target 이 화면 어디에 있는지는 알지만 거리를 모름 → 판정 불가
+#   - Depth only: 가장 가까운 표면까지 거리는 알지만 그게 무엇인지 모름
 def compute_single_sensor_baselines(results, depth, K, cam_pose, robot_pose, max_reach, final):
     target = next((r for r in results if r["role"] == "TARGET"), None)
     rgb_only = {"target_detected": bool(target and target["detected"]),
                 "centroid": target["centroid"] if target else None,
                 "distance": None, "reachability": "UNKNOWN"}
     d_only = depth_only_baseline(depth, K, cam_pose, robot_pose, max_reach)
-    # 설명용: depth-only 가 고른 pixel 이 실제로 무엇인지는 RGB mask 가 있어야만 알 수 있음
+    # 설명용: Depth only 가 고른 점이 실제로 어떤 물체인지 RGB mask 로 확인 (Depth 만으로는 알 수 없음)
     d_only["actually_is"] = "unknown surface"
     if d_only["available"]:
         pu, pv = int(d_only["pixel"][0]), int(d_only["pixel"][1])
@@ -1258,6 +1324,7 @@ def compute_single_sensor_baselines(results, depth, K, cam_pose, robot_pose, max
             if r["mask"] is not None and r["mask"][pv, pu]:
                 d_only["actually_is"] = r["name"]
                 break
+    # Depth only 판정과 융합 판정이 같은지 (Target 판정이 가능한 경우에만 비교)
     agree = None
     if d_only["available"] and final["status"] in ("REACHABLE RANGE", "OUT OF RANGE"):
         agree = d_only["naive_status"] == final["status"]
@@ -1265,9 +1332,9 @@ def compute_single_sensor_baselines(results, depth, K, cam_pose, robot_pose, max
 
 
 def attach_ground_truth_validation(results, scene, robot_pose):
-    """[VALIDATION ONLY] stage 의 GT 물체 중심 위치로 거리를 계산해 오차를 보여준다.
-    이 값은 range_status / FINAL 판단에 절대 사용하지 않는다.
-    (센서 추정점은 '보이는 표면'이므로 물체 중심 대비 수 cm 차이가 정상)"""
+    """[검증용] 시뮬레이터가 아는 물체의 실제 중심 위치(GT)로 거리를 계산해, 센서 추정값과 비교한다.
+    이 값은 판정(range_status / FINAL)에 절대 쓰지 않는다.
+    ※ 센서는 물체의 '보이는 표면'을 재므로, 물체 중심 기준인 GT 와 몇 cm 차이 나는 것이 정상이다."""
     t_wr, R_wr = robot_pose
     for r in results:
         r["gt_robot_dist"] = None
@@ -1279,33 +1346,39 @@ def attach_ground_truth_validation(results, scene, robot_pose):
 
 
 # =============================================================================
-# 12. 한 frame 처리 (Fusion 핵심)
+# 12. 한 frame 처리 (센서 융합 전체 흐름)
 # =============================================================================
-# ★★★----------------------------------------------------------------------
-# ★ [CORE-7] Fusion 파이프라인: CORE-2 -> 3 -> 4 -> 5 -> 6 을 한 frame 에 연결
-# ★★★----------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# ★ [CORE-7] 융합 파이프라인: CORE-2 → 3 → 4 → 5 → 6 을 순서대로 실행
+# ─────────────────────────────────────────────────────────────────────────────
 def process_rgbd(camera, frame, scene, max_reach):
-    """RGB(t) 와 Depth(t) (같은 frame dict) 를 융합해 객체별 결과와 FINAL 을 만든다."""
+    """같은 frame 의 RGB 와 Depth 를 융합해 물체별 결과와 최종 판정을 만든다.
+
+    물체마다:  RGB 검출 → mask 안쪽 depth → 3D 위치(카메라 / world) → 로봇 기준 위치 → 거리
+    그 다음 :  Target 기준 최종 판정 + 단일 센서 비교 + (선택) GT 검증
+
+    반환 bundle: {results(물체별 결과), final(최종 판정), baselines(단일 센서 비교),
+                 K, K_source, cam_pose, robot_pose}"""
     rgb, depth = frame["rgb"], frame["depth"]
     K, k_src = get_intrinsics(camera)
     cam_pose = get_camera_pose_ros(camera)
-    robot_pose = get_robot_base_pose(scene)          # 매 처리 시 stage 에서 현재 robot base pose 를 읽음
+    robot_pose = get_robot_base_pose(scene)          # 로봇 위치는 매번 stage 에서 새로 읽음
 
-    detections = detect_objects_rgb(rgb, OBJECT_SPECS)                   # RGB -> WHAT
+    detections = detect_objects_rgb(rgb, OBJECT_SPECS)                   # [CORE-2] RGB → 무엇인가
     results = []
     for spec in OBJECT_SPECS:
         r = dict(detections[spec["name"]])
         r.update({"p_cam": None, "p_world": None, "p_robot": None, "robot_dist": None,
                   "unproj_method": None, "unproj_check_m": None})
-        r.update(extract_object_depth(depth, r["mask"]))                 # RGB mask 가 Depth pixel 을 선택
+        r.update(extract_object_depth(depth, r["mask"]))                 # [CORE-3] RGB mask 로 depth pixel 선택
         if r["detected"] and r["depth_valid"]:
             u, v = r["centroid"]
-            r.update(pixel_depth_to_3d(camera, u, v, r["depth_median"], K, cam_pose))   # -> camera / world
-            r["p_robot"] = world_to_robot_base(r["p_world"], *robot_pose)               # -> robot base
-            r["robot_dist"] = float(np.linalg.norm(r["p_robot"]))
+            r.update(pixel_depth_to_3d(camera, u, v, r["depth_median"], K, cam_pose))   # [CORE-4] → 카메라 / world
+            r["p_robot"] = world_to_robot_base(r["p_world"], *robot_pose)               # [CORE-5] → 로봇 base
+            r["robot_dist"] = float(np.linalg.norm(r["p_robot"]))                       # 로봇 base 원점까지 거리
         results.append(r)
 
-    final = evaluate_reachability(results, max_reach)
+    final = evaluate_reachability(results, max_reach)                    # [CORE-6] 최종 판정
     baselines = compute_single_sensor_baselines(results, depth, K, cam_pose, robot_pose, max_reach, final)
     if SHOW_GT_VALIDATION:
         attach_ground_truth_validation(results, scene, robot_pose)
@@ -1316,6 +1389,7 @@ def process_rgbd(camera, frame, scene, max_reach):
 # =============================================================================
 # 13. 콘솔 출력
 # =============================================================================
+# 한 frame 의 결과를 콘솔 / 텍스트 파일용 표 문자열로 만든다
 def format_results_text(bundle, meta):
     results, final, base = bundle["results"], bundle["final"], bundle["baselines"]
     line = "-" * 96
@@ -1388,12 +1462,13 @@ def print_results(bundle, meta):
 
 
 def print_startup_info(camera, scene):
-    """센서 의미 / 단위 / 좌표계 / intrinsics / pose 를 시작 시 1회 출력."""
+    """시작할 때 한 번, 센서 설정 · 단위 · 좌표계 · 카메라 내부 파라미터 · 카메라/로봇 위치를 출력한다."""
     K, k_src = get_intrinsics(camera)
     t_wc, R_wc, pose_src = get_camera_pose_ros(camera)
     t_wr, R_wr = get_robot_base_pose(scene)
     f_expected = np.asarray(CAMERA_TARGET, float) - np.asarray(CAMERA_POSITION, float)
     f_expected /= np.linalg.norm(f_expected)
+    # 카메라 광축(z)이 의도한 바라보는 방향과 일치하는지 확인 (1 에 가까우면 정상)
     axis_dot = float(np.dot(R_wc[:, 2], f_expected))
     log("=" * 90)
     log("SENSORS (same camera prim, same render product, same frame):")
@@ -1424,13 +1499,13 @@ def print_startup_info(camera, scene):
 
 
 # =============================================================================
-# 14. Overlay / Depth 시각화
+# 14. OpenCV 결과 이미지 (선택 기능, --cv-windows 또는 저장 시에만 사용)
 # =============================================================================
-STATUS_COLORS_BGR = {"REACHABLE RANGE": (0, 200, 0), "OUT OF RANGE": (0, 0, 255)}
+STATUS_COLORS_BGR = {"REACHABLE RANGE": (0, 200, 0), "OUT OF RANGE": (0, 0, 255)}   # 판정별 글자색 (OpenCV 는 BGR 순서)
 
 
 def _put(img, text, org, color=(255, 255, 255), scale=0.45, thick=1, bg=(0, 0, 0)):
-    """배경 박스가 있는 텍스트 (가독성)."""
+    """글자 뒤에 배경 상자를 깔아 읽기 쉽게 텍스트를 그린다. (bg=None 이면 배경 없음)"""
     (tw, th), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
     x, y = int(org[0]), int(org[1])
     if bg is not None:
@@ -1439,8 +1514,10 @@ def _put(img, text, org, color=(255, 255, 255), scale=0.45, thick=1, bg=(0, 0, 0
 
 
 def draw_overlay(rgb, bundle, meta):
-    """annotated RGB (최종 결과 화면). 객체별 bbox/contour, 이름, 역할, depth, robot 거리, IN/OUT,
-    상단에 TARGET / MAX REACH / TARGET DIST / FINAL, 하단에 RGB-only / Depth-only / Fusion 비교."""
+    """결과를 표시한 RGB 이미지를 만든다.
+    - 물체마다  : 윤곽선 · 사각형 · 이름 · 역할 · depth · 로봇 거리 · IN/OUT
+    - 위쪽 여백 : TARGET / MAX REACH / TARGET DIST / FINAL
+    - 아래쪽 여백: RGB only / Depth only / 융합 결과 비교"""
     if cv2 is None:
         return None
     results, final, base = bundle["results"], bundle["final"], bundle["baselines"]
@@ -1462,12 +1539,13 @@ def draw_overlay(rgb, bundle, meta):
                  (f"Z {fmt(r['depth_median'])}m  R {fmt(r['robot_dist'])}m", (255, 255, 255)),
                  ({"IN": "IN RANGE", "OUT": "OUT OF RANGE"}.get(rs, "N/A") if r["depth_valid"]
                   else "INVALID DEPTH", rs_col)]
-        y = y0 - 8 - 16 * (len(lines) - 1)
-        if y < 14:
+        y = y0 - 8 - 16 * (len(lines) - 1)          # 라벨은 사각형 위에 표시
+        if y < 14:                                  # 화면 위로 넘어가면 사각형 아래에 표시
             y = y1 + 18
         for text, c in lines:
             _put(img, text, (max(0, x0), y), c)
             y += 16
+    # 영상 위아래에 글자용 여백을 붙인 캔버스
     top, bottom = 58, 100
     canvas = np.zeros((H + top + bottom, W, 3), dtype=np.uint8)
     canvas[top:top + H] = img
@@ -1490,7 +1568,7 @@ def draw_overlay(rgb, bundle, meta):
 
 
 def make_depth_vis(depth, bundle):
-    """Depth 보조 시각화 (최종 결과 화면 아님). 가까울수록 밝게, invalid 는 검정."""
+    """Depth 보조 이미지 (가까울수록 밝게, 무효값은 검정). 물체 윤곽선과 Depth only 가 고른 점도 표시한다."""
     if cv2 is None:
         return None
     valid = np.isfinite(depth) & (depth > 0)
@@ -1513,13 +1591,14 @@ def make_depth_vis(depth, bundle):
 
 
 class Visualizer:
-    """OpenCV 창 관리. GUI 오류가 나면 창만 끄고 simulation / 콘솔 출력은 계속한다."""
+    """OpenCV 창 관리. 창에서 오류가 나면 창만 끄고 시뮬레이션과 콘솔 출력은 계속한다."""
 
     def __init__(self):
         self.enabled = cv2 is not None and (SHOW_OVERLAY or SHOW_DEPTH_WINDOW)
         if (SHOW_OVERLAY or SHOW_DEPTH_WINDOW) and cv2 is None:
             log("Overlay requested but OpenCV is missing -> console only.", "WARN")
 
+    # 이미지를 창에 띄우고, 눌린 키 코드를 반환 (없으면 -1)
     def show(self, annotated, depth_vis):
         if not self.enabled:
             return -1
@@ -1535,6 +1614,7 @@ class Visualizer:
             self.close()
             return -1
 
+    # 새 이미지 없이 키 입력만 확인
     def poll(self):
         if not self.enabled:
             return -1
@@ -1552,10 +1632,11 @@ class Visualizer:
 
 
 # =============================================================================
-# 14-B. [VIZ] Viewport Reach 시각화 (isaacsim.util.debug_draw) - 시각화 전용
+# 14-B. [VIZ] Viewport 에 작업 반경 그리기 (debug_draw) — 시각화 전용
 # =============================================================================
 def _ring_segments(center, u_axis, v_axis, radius, n_seg, a0=0.0, a1=2.0 * math.pi):
-    """center 를 중심으로 (u_axis, v_axis) 평면의 원/호를 n_seg 개 선분으로 나눈 (starts, ends)."""
+    """center 를 중심으로 u_axis·v_axis 평면 위의 원(또는 각도 a0~a1 구간의 호)을 n_seg 개 선분으로 나눈다.
+    반환: (시작점 배열, 끝점 배열)"""
     ang = np.linspace(a0, a1, n_seg + 1)
     pts = (np.asarray(center, dtype=float)[None, :]
            + radius * (np.cos(ang)[:, None] * np.asarray(u_axis, dtype=float)[None, :]
@@ -1564,16 +1645,13 @@ def _ring_segments(center, u_axis, v_axis, radius, n_seg, a0=0.0, a1=2.0 * math.
 
 
 class ReachVisualizer:
-    """MAX_REACH_M 작업 반경과 Target 연결선을 Viewport 에 그린다.
+    """작업 반경(MAX_REACH_M)과 로봇–Target 연결선을 Viewport 에 그린다.
 
-    - isaacsim.util.debug_draw 는 USD prim / collider / rigid body 를 만들지 않는 순수 시각화이다.
-      -> 물리 scene 과 센서 판단에 영향 없음.
-    - 판정은 full 3D sphere 기준 (robot base 원점으로부터 3D Euclidean distance <= MAX_REACH_M)이고,
-      visualization 은 가독성을 위해 upper hemisphere 만 표시한다.
-      (작업대 아래쪽 반구는 그리지 않을 뿐, 판정에서 제외되는 것이 아님)
-    - debug_draw 의 clear_lines()/clear_points() 는 그려진 '모든' 선/점을 지우므로,
-      boundary 선분은 (반경 / robot pose 가 바뀔 때만) 다시 계산해 캐시하고,
-      변경이 생겼을 때만 clear -> boundary + target line 을 한 번에 다시 그린다 (매 frame 누적 없음)."""
+    - debug_draw 는 화면에 선만 그릴 뿐 USD prim·충돌체를 만들지 않는다 → 물리와 센서 판정에 영향 없음.
+    - 판정은 3D 구(sphere) 전체 기준이지만, 보기 쉽게 위쪽 반구만 그린다.
+      (아래쪽 반구를 그리지 않을 뿐, 판정에서 빠지는 것은 아니다)
+    - clear_lines() 는 화면의 '모든' 선을 지우므로, 반경·로봇 위치·Target 이 바뀌었을 때만
+      전부 지우고 한 번에 다시 그린다. (매 frame 다시 그리거나 선이 쌓이지 않음)"""
 
     def __init__(self):
         if _debug_draw is None:
@@ -1582,42 +1660,44 @@ class ReachVisualizer:
         self.enabled = True
         self.radius = None
         self._boundary_key = None
-        self._boundary = ([], [], [], [])       # starts, ends, colors, widths (캐시)
+        self._boundary = ([], [], [], [])       # 경계선 캐시: (시작점들, 끝점들, 색들, 두께들)
         self._base_world = None
         self._target_key = None
-        self._target = None                     # (start, end, color) 또는 None
+        self._target = None                     # Target 연결선: (시작점, 끝점, 색) 또는 None
         self.target_text = "N/A"
 
+    # numpy 점 → debug_draw 가 받는 (x, y, z) float 튜플
     @staticmethod
     def _f3(p):
         return (float(p[0]), float(p[1]), float(p[2]))
 
     def _build_boundary(self, t_wr, R_wr, r):
-        """robot base frame 의 축(ex, ey, ez)을 따라 상부 hemisphere wireframe + 작업대 표면 원을 만든다."""
+        """로봇 base 축(ex, ey, ez) 기준으로 위쪽 반구 wireframe 과 작업대 위 원을 선분 목록으로 만든다."""
         ex, ey, ez = R_wr[:, 0], R_wr[:, 1], R_wr[:, 2]
-        segs = []                                                   # (starts, ends, color, width)
+        segs = []                                                   # (시작점들, 끝점들, 색, 두께)
         bc, bw = REACH_VIZ_BOUNDARY_COLOR, REACH_VIZ_BOUNDARY_WIDTH
-        # (1) XZ / YZ 방향 반원 arc (robot base frame 기준, 위쪽 절반만)
+        # (1) 세로 반원 2개 (로봇 기준 XZ, YZ 평면의 위쪽 절반)
         segs.append((*_ring_segments(t_wr, ex, ez, r, 24, 0.0, math.pi), bc, bw))
         segs.append((*_ring_segments(t_wr, ey, ez, r, 24, 0.0, math.pi), bc, bw))
-        # (2) 위도 ring (30 deg, 60 deg)
+        # (2) 위도선 (30°, 60° 높이의 수평 원)
         for lat in REACH_VIZ_LATITUDES_DEG:
             el = math.radians(lat)
             segs.append((*_ring_segments(t_wr + r * math.sin(el) * ez, ex, ey, r * math.cos(el), 40), bc, bw))
-        # (3) 작업대 표면 원: z = TABLE_TOP_Z + offset 평면과 판정 구(sphere)의 교선.
-        #     robot base 가 작업대 위에 있으면 dz ~ 0 이므로 반경 ~= MAX_REACH_M.
+        # (3) 작업대 위 원: 판정 구(sphere)와 작업대 표면이 만나는 원
+        #     로봇 base 가 작업대 높이에 있으면 dz ≈ 0 이므로 이 원의 반지름 ≈ MAX_REACH_M
         z_plane = TABLE_TOP_Z + REACH_VIZ_TABLE_OFFSET_M
         dz = z_plane - t_wr[2]
         if abs(dz) < r:
             r_table = math.sqrt(r * r - dz * dz)
             segs.append((*_ring_segments((t_wr[0], t_wr[1], z_plane), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
                                          r_table, 72), REACH_VIZ_TABLE_RING_COLOR, REACH_VIZ_TABLE_RING_WIDTH))
-        # (4) robot base 평면의 equator: 작업대 원과 거의 겹치면(1 cm 이내) 생략
+        # (4) 로봇 base 높이의 적도 원: 작업대 원과 1 cm 이내로 겹치면 생략
         if abs(dz) > 0.01:
             segs.append((*_ring_segments(t_wr, ex, ey, r, 64), bc, bw))
-        # (5) robot base 중심 cross marker
+        # (5) 로봇 base 중심의 십자 표시
         for axis in (ex, ey, ez):
             segs.append((np.array([t_wr - 0.04 * axis]), np.array([t_wr + 0.04 * axis]), REACH_VIZ_BASE_COLOR, 2.0))
+        # 선분 묶음들을 draw_lines() 가 받는 평평한 리스트로 펼치기
         starts, ends, colors, widths = [], [], [], []
         for s, e, c, w in segs:
             starts += [self._f3(p) for p in s]
@@ -1627,7 +1707,7 @@ class ReachVisualizer:
         return starts, ends, colors, widths
 
     def update_boundary(self, robot_pose, max_reach):
-        """반경 또는 robot base pose 가 바뀐 경우에만 boundary 를 다시 계산하고 다시 그린다."""
+        """반경이나 로봇 위치가 바뀐 경우에만 경계선을 다시 계산해 다시 그린다. 다시 그렸으면 True."""
         t_wr, R_wr = robot_pose
         key = (round(float(max_reach), 4), tuple(np.round(t_wr, 3)), tuple(np.round(R_wr, 3).ravel()))
         if key == self._boundary_key:
@@ -1641,8 +1721,8 @@ class ReachVisualizer:
         return True
 
     def update_target_line(self, robot_world, target_world, status):
-        """RGB-D 로 추정한 Target p_world 와 robot base 를 잇는 선. GT pose 는 사용하지 않는다.
-        REACHABLE = 초록, OUT OF RANGE = 빨강, 그 외(NOT DETECTED / DEPTH INVALID) = 선 없음."""
+        """로봇 base 와 Target 추정 위치(RGB-D 로 계산한 p_world)를 잇는 선을 갱신한다. GT 는 쓰지 않는다.
+        선 색: REACHABLE = 초록, OUT OF RANGE = 빨강, 그 외(미검출 / depth 무효) = 선 숨김"""
         if target_world is not None and status in ("REACHABLE RANGE", "OUT OF RANGE"):
             color = REACH_VIZ_IN_COLOR if status == "REACHABLE RANGE" else REACH_VIZ_OUT_COLOR
             key = (status, tuple(np.round(target_world, 3)), tuple(np.round(robot_world, 3)))
@@ -1657,15 +1737,17 @@ class ReachVisualizer:
         self._redraw()
         return True
 
+    # 시각화 켜기 / 끄기
     def set_enabled(self, on):
         self.enabled = bool(on)
         self._redraw()
 
     def clear(self):
-        """debug_draw 의 모든 선/점 제거."""
+        """debug_draw 로 그린 모든 선과 점을 지운다."""
         self._draw.clear_lines()
         self._draw.clear_points()
 
+    # 화면을 지우고, 캐시된 경계선 + Target 연결선 + 점들을 한 번에 다시 그린다
     def _redraw(self):
         self.clear()
         if not self.enabled:
@@ -1690,6 +1772,7 @@ class ReachVisualizer:
         if points:
             self._draw.draw_points(points, pcolors, psizes)
 
+    # 그린 것을 모두 지우고 debug_draw 인터페이스를 반납한다
     def shutdown(self):
         try:
             self.clear()
@@ -1699,13 +1782,14 @@ class ReachVisualizer:
 
 
 # =============================================================================
-# 15. Isaac Sim 내부 결과 패널 (omni.ui) - 표시 전용, 계산은 하지 않음
+# 15. Isaac Sim 안의 결과 패널 (omni.ui) — 표시만 하고 계산은 하지 않음
 # =============================================================================
 def _abgr(r, g, b, a=255):
-    """omni.ui 색상 정수 형식은 0xAABBGGRR."""
+    """omni.ui 색상 값을 만든다. (omni.ui 는 0xAABBGGRR 정수 형식을 쓴다)"""
     return (a << 24) | (b << 16) | (g << 8) | r
 
 
+# 패널에서 쓰는 색
 UI_WHITE = _abgr(235, 235, 235)
 UI_GRAY = _abgr(150, 150, 155)
 UI_HEADER = _abgr(120, 180, 255)
@@ -1721,18 +1805,17 @@ UI_FINAL_NEUTRAL_BG = _abgr(90, 70, 20)
 
 
 def _m(v):
-    """거리 값 표기: 없으면 N/A."""
+    """거리 값을 'x.xxx m' 로 표시한다. 값이 없으면 N/A."""
     return "N/A" if v is None else f"{v:.3f} m"
 
 
 class FusionMonitorUI:
-    """'RGB-D Fusion Monitor' : Isaac Sim GUI 안의 omni.ui Window.
+    """Isaac Sim 화면 안에 뜨는 'RGB-D Fusion Monitor' 패널.
 
-    - 위젯은 생성자에서 한 번만 만들고, update() 에서는 Label.text / style 만 바꾼다.
-    - 표시하는 값은 process_rgbd() 가 반환한 bundle(results / final / baselines) 그대로이며,
-      GT 값은 표시하지 않는다.
-    - 버튼은 동작을 직접 실행하지 않고 요청(request) 큐에 넣는다. main loop 가 simulation step 사이에
-      꺼내서 apply_scenario() 등을 '한 번' 실행한다 -> 센서 처리와 UI 가 분리됨."""
+    - 위젯은 생성자에서 한 번만 만들고, update() 에서는 글자와 색만 바꾼다.
+    - process_rgbd() 결과(bundle)를 그대로 보여준다. GT 값은 표시하지 않는다.
+    - 버튼을 눌러도 바로 실행하지 않고 요청 목록에 넣어 둔다.
+      main loop 가 simulation step 사이에 꺼내서 한 번씩 처리한다 → 센서 처리와 UI 가 서로 간섭하지 않음."""
 
     def __init__(self, title="RGB-D Fusion Monitor"):
         self._requests = []
@@ -1740,7 +1823,7 @@ class FusionMonitorUI:
         self._dock_attempted = False
         self.obj_widgets = {}
         self.window = ui.Window(title, width=MONITOR_WIDTH, height=MONITOR_HEIGHT)
-        try:   # floating 기본 위치: 화면 오른쪽 (Stage/Property 패널 왼쪽)
+        try:   # 떠 있는 창의 기본 위치: 화면 오른쪽 (Stage / Property 패널의 왼쪽)
             self.window.position_x = max(0, 1600 - MONITOR_WIDTH - 430)
             self.window.position_y = 40
         except Exception:  # noqa: BLE001
@@ -1748,6 +1831,7 @@ class FusionMonitorUI:
         self._build()
 
     # ---- 위젯 생성 helper ----
+    # 구역 제목 + 구분선
     @staticmethod
     def _section(text):
         ui.Spacer(height=8)
@@ -1755,6 +1839,7 @@ class FusionMonitorUI:
         ui.Line(height=2, style={"color": UI_GRAY})
         ui.Spacer(height=2)
 
+    # "항목 이름 | 값" 한 줄. 나중에 값을 바꿀 수 있도록 값 Label 을 반환
     @staticmethod
     def _kv(key, key_width=120):
         with ui.HStack(height=20):
@@ -1762,10 +1847,12 @@ class FusionMonitorUI:
             value = ui.Label("N/A", style={"color": UI_WHITE})
         return value
 
+    # 버튼 요청을 목록에 넣는다 (실제 처리는 main loop 에서)
     def _request(self, action):
         self._requests.append(action)
         self.lbl_action.text = f"Requested: {action}"
 
+    # 패널 전체 레이아웃 (위에서부터 TARGET → FINAL → OBJECTS → 센서 비교 → 시각화 → 시나리오 버튼)
     def _build(self):
         with self.window.frame:
             with ui.ScrollingFrame(horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF):
@@ -1840,6 +1927,7 @@ class FusionMonitorUI:
                     self.lbl_action = ui.Label("", height=0, word_wrap=True, style={"font_size": 12, "color": UI_GRAY})
                     ui.Spacer(height=10)
 
+    # 물체 하나의 카드: 왼쪽 색 띠 + 이름 · 역할 · 검출 · depth · 거리 · 판정 (Target 은 노란 테두리)
     def _build_object_card(self, spec):
         name = spec["name"]
         is_t = object_role(name) == "TARGET"
@@ -1863,7 +1951,7 @@ class FusionMonitorUI:
 
     # ---- main loop 에서 호출 ----
     def tick(self):
-        """매 loop 호출. 몇 frame 뒤 (창이 실제로 만들어진 뒤) 한 번만 docking 을 시도한다."""
+        """매 loop 호출된다. 창이 실제로 만들어질 때까지 몇 번 기다린 뒤, Viewport 오른쪽에 붙이기를 한 번만 시도한다."""
         self._ticks += 1
         if not self._dock_attempted and self._ticks >= 10:
             self._dock_attempted = True
@@ -1879,6 +1967,7 @@ class FusionMonitorUI:
             except Exception as e:  # noqa: BLE001
                 log(f"Docking failed ({e}); Fusion Monitor stays floating.", "WARN")
 
+    # 쌓인 버튼 요청을 꺼내고 목록을 비운다
     def pop_requests(self):
         reqs, self._requests = self._requests, []
         return reqs
@@ -1890,17 +1979,18 @@ class FusionMonitorUI:
         self.lbl_action.text = text
 
     def update_reach(self, radius, boundary_on, line_text):
-        """REACH VISUALIZATION 항목 갱신 (텍스트만 변경)."""
+        """REACH VISUALIZATION 구역의 글자를 갱신한다."""
         self.lbl_reach_radius.text = "N/A" if radius is None else f"{radius:.2f} m"
         self.lbl_reach_boundary.text = boundary_on
         self.lbl_reach_boundary.style = {"color": UI_GREEN if boundary_on == "ON" else UI_GRAY}
         self.lbl_reach_line.text = line_text
 
     def update(self, bundle, meta):
-        """bundle 의 실제 센서융합 결과만으로 text/style 을 갱신 (위젯 재생성 없음)."""
+        """센서 융합 결과(bundle)로 패널의 글자와 색을 갱신한다. (위젯은 새로 만들지 않음)"""
         results, final, base = bundle["results"], bundle["final"], bundle["baselines"]
         target = next((r for r in results if r["role"] == "TARGET"), None)
         status = final["status"]
+        # 최종 판정에 따라 글자색 / 배경색 선택
         if status == "REACHABLE RANGE":
             fg, bg = UI_GREEN, UI_FINAL_GREEN_BG
         elif status == "OUT OF RANGE":
@@ -1918,6 +2008,7 @@ class FusionMonitorUI:
         self.lbl_final_note.text = ("" if status in ("REACHABLE RANGE", "OUT OF RANGE")
                                     else f"Reason: {final.get('reason', '')}")
 
+        # 물체별 카드
         for r in results:
             w = self.obj_widgets.get(r["name"])
             if w is None:
@@ -1930,6 +2021,7 @@ class FusionMonitorUI:
             w["range"].text = rs
             w["range"].style = {"color": UI_GREEN if rs == "IN" else (UI_RED if rs == "OUT" else UI_GRAY)}
 
+        # 단일 센서 비교
         ro, do = base["rgb_only"], base["depth_only"]
         self.lbl_rgb_det.text = "YES" if ro["target_detected"] else "NO"
         self.lbl_rgb_dist.text = "N/A"
@@ -1960,8 +2052,9 @@ class FusionMonitorUI:
 
 
 # =============================================================================
-# 16. 결과 저장
+# 16. 결과 저장 (output/ 폴더)
 # =============================================================================
+# results.csv 의 열 목록 (물체 하나당 한 줄)
 CSV_FIELDS = ["wall_time", "scenario", "frame", "camera_frame", "sim_time", "object", "role", "detected",
               "pixel_count", "valid_depth_px", "depth_m", "u", "v", "cam_x", "cam_y", "cam_z",
               "world_x", "world_y", "world_z", "robot_x", "robot_y", "robot_z", "robot_distance_m",
@@ -1969,7 +2062,11 @@ CSV_FIELDS = ["wall_time", "scenario", "frame", "camera_frame", "sim_time", "obj
 
 
 def save_results(bundle, meta, rgb, depth, annotated, depth_vis):
-    """output/ 에 annotated RGB, depth 시각화, 결과 txt, results.csv(누적) 를 저장한다."""
+    """output/ 폴더에 결과를 저장한다.
+      {tag}_annotated_rgb.png : 결과를 표시한 RGB 이미지
+      {tag}_depth_vis.png     : depth 이미지
+      {tag}_summary.txt       : 콘솔에 출력되는 것과 같은 결과 표
+      results.csv             : 물체별 수치 (파일 끝에 계속 추가됨)"""
     try:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         tag = f"scn{meta['scenario']}_f{meta['step']:06d}"
@@ -1983,7 +2080,7 @@ def save_results(bundle, meta, rgb, depth, annotated, depth_vis):
                 p = os.path.join(OUTPUT_DIR, f"{tag}_depth_vis.png")
                 cv2.imwrite(p, depth_vis)
                 saved.append(p)
-        else:
+        else:                                   # OpenCV 가 없으면 원본 RGB 만 PIL 로 저장
             try:
                 from PIL import Image
                 p = os.path.join(OUTPUT_DIR, f"{tag}_raw_rgb.png")
@@ -2004,6 +2101,7 @@ def save_results(bundle, meta, rgb, depth, annotated, depth_vis):
             if new_file:
                 wr.writeheader()
             for r in bundle["results"]:
+                # 벡터의 i 번째 성분을 문자열로 (값이 없으면 빈칸)
                 def comp(vec, i):
                     return "" if vec is None else f"{float(vec[i]):.4f}"
                 wr.writerow({
@@ -2036,7 +2134,7 @@ def save_results(bundle, meta, rgb, depth, annotated, depth_vis):
 # 17. Main loop
 # =============================================================================
 def _key_to_action(key):
-    """OpenCV 창(선택 fallback) 키 입력 -> 패널 버튼과 같은 action 문자열."""
+    """OpenCV 창의 키 입력을 패널 버튼과 같은 요청 문자열로 바꾼다."""
     if key in (ord("q"), 27):
         return "quit"
     if key in (ord("a"), ord("b"), ord("c")):
@@ -2044,6 +2142,7 @@ def _key_to_action(key):
     return {ord("s"): "save", ord("]"): "reach+", ord("["): "reach-"}.get(key)
 
 
+# scene 을 만든 뒤, 매 simulation step 마다 "센서 처리 → 결과 표시 → 사용자 요청 처리"를 반복한다
 def main():
     global SCENARIO, MAX_REACH_M
     if TARGET_NAME not in [s["name"] for s in OBJECT_SPECS]:
@@ -2057,12 +2156,12 @@ def main():
     log("world.reset() ... (asset loading / shader compile can take minutes on first run)")
     world.reset()
     camera.initialize()
-    camera.add_distance_to_image_plane_to_frame()   # Depth(Z) annotator 를 RGB 와 같은 render product 에 부착
+    camera.add_distance_to_image_plane_to_frame()   # RGB 와 같은 카메라 렌더 결과에 Depth(Z) 출력 추가
     apply_robot_home(scene)
     print_startup_info(camera, scene)
     validate_scene_layout(camera, scene)
 
-    # ---- 결과 표시 계층 (센서 처리와 분리). 실패해도 console-only 로 계속 ----
+    # ---- 결과 패널 (센서 처리와 분리. 만들기에 실패해도 콘솔 출력만으로 계속) ----
     ui_panel = None
     if SHOW_FUSION_MONITOR and ui is not None:
         try:
@@ -2074,7 +2173,7 @@ def main():
             traceback.print_exc()
     viz = Visualizer()
 
-    # ---- [VIZ] Viewport reach 시각화 (실패해도 센서 처리 / 판단에는 영향 없음) ----
+    # ---- [VIZ] Viewport 작업 반경 시각화 (실패해도 센서 처리 / 판정에는 영향 없음) ----
     reach_viz = None
     if REACH_VIZ_ENABLED and _debug_draw is not None:
         try:
@@ -2084,6 +2183,7 @@ def main():
             reach_viz = None
             log(f"ReachVisualizer creation failed ({e}); continuing without reach visualization.", "WARN")
 
+    # ---- loop 상태 변수 ----
     step = 0
     steps_since_reset = 0
     last_cam_frame = None
@@ -2105,22 +2205,22 @@ def main():
                 ui_panel = None
 
         if world.is_stopped():
-            # Stop 버튼 -> 다시 Play 시 reset (물체는 default state 로 돌아감)
+            # Stop 상태: 다시 Play 하면 reset 한다 (물체는 기본 위치로 돌아감)
             reset_needed = True
             if ui_panel is not None:
                 ui_panel.set_status("STOPPED - press Play to resume sensing")
             key = viz.poll()
-        elif not world.is_playing():          # Pause
+        elif not world.is_playing():          # Pause 상태
             if ui_panel is not None:
                 ui_panel.set_status("PAUSED")
             key = viz.poll()
-        elif reset_needed:
+        elif reset_needed:                    # Stop 후 다시 Play: scene 초기화
             world.reset()
             apply_robot_home(scene)
             reset_needed = False
             steps_since_reset = 0
             last_cam_frame = None
-        else:
+        else:                                 # 실행 중: 센서 처리
             step += 1
             steps_since_reset += 1
             frame = acquire_rgbd_frame(camera) if steps_since_reset >= WARMUP_FRAMES else None
@@ -2129,9 +2229,9 @@ def main():
                     RL.warn("noframe", "Camera buffers not ready yet (empty RGB/Depth); waiting...")
                 key = viz.poll()
             elif frame["rendering_frame"] is not None and frame["rendering_frame"] == last_cam_frame:
-                key = viz.poll()            # 새 카메라 frame 이 없으면 처리 생략 (CAMERA_FREQUENCY 기준)
+                key = viz.poll()            # 새 카메라 frame 이 아니면 건너뜀 (카메라는 CAMERA_FREQUENCY 로만 갱신)
             else:
-                # ---- 같은 frame 의 RGB(t), Depth(t) 로 센서융합 ----
+                # ---- 같은 frame 의 RGB, Depth 로 센서 융합 ----
                 cam_frame = frame["rendering_frame"]
                 last_cam_frame = cam_frame
                 meta = {"scenario": SCENARIO, "step": step, "sim_time": float(world.current_time),
@@ -2157,8 +2257,8 @@ def main():
                     RL.warn("process", f"Frame processing error at step {step}: {e}\n{traceback.format_exc()}",
                             "ERROR")
                     key = viz.poll()
-                # [VIZ] Target 연결선: process_rgbd() 의 RGB-D 추정 p_world 와 같은 bundle 의 robot base 위치 사용
-                #       (stage GT pose 사용 안 함). NOT DETECTED / DEPTH INVALID 이면 선을 숨긴다.
+                # [VIZ] Target 연결선: 이번 frame 의 RGB-D 추정 위치를 사용 (GT 아님)
+                #       Target 미검출 / depth 무효이면 선을 숨긴다.
                 if bundle is not None and reach_viz is not None:
                     try:
                         tgt = next((r for r in bundle["results"] if r["role"] == "TARGET"), None)
@@ -2168,7 +2268,7 @@ def main():
                     except Exception as e:  # noqa: BLE001
                         log(f"Reach visualization error ({e}); disabling it, sensing continues.", "WARN")
                         reach_viz = None
-                # UI 갱신: 위 bundle 을 그대로 전달 (UI 오류는 센서 처리에 영향 없음)
+                # 패널 갱신: 같은 bundle 을 그대로 전달 (패널 오류는 센서 처리에 영향 없음)
                 if bundle is not None and ui_panel is not None:
                     try:
                         ui_panel.update(bundle, meta)
@@ -2177,7 +2277,7 @@ def main():
                         traceback.print_exc()
                         ui_panel = None
 
-        # ---- 사용자 요청 처리 (패널 버튼 / OpenCV 키). 요청 시 '한 번만' 실행 ----
+        # ---- 사용자 요청 처리 (패널 버튼 / OpenCV 키). 요청마다 한 번만 실행 ----
         key_action = _key_to_action(key)
         if key_action:
             actions.append(key_action)
@@ -2192,7 +2292,7 @@ def main():
                 if ui_panel is not None:
                     ui_panel.set_action_text(f"Scenario {SCENARIO} applied once. Objects are free to move.")
             elif action == "save":
-                save_requested = True           # 다음 처리 frame 의 결과를 저장
+                save_requested = True           # 다음에 처리되는 frame 의 결과를 저장
             elif action in ("reach+", "reach-"):
                 delta = 0.05 if action == "reach+" else -0.05
                 MAX_REACH_M = max(0.05, round(MAX_REACH_M + delta, 3))
@@ -2208,14 +2308,15 @@ def main():
             log("Quit requested.")
             break
 
-        # ---- [VIZ] reach boundary: 현재 MAX_REACH_M 와 stage 에서 읽은 robot base pose 사용.
-        #      둘 중 하나가 바뀐 경우에만 내부에서 clear 후 다시 그림 (변화 없으면 아무것도 안 함) ----
+        # ---- [VIZ] 작업 반경 경계선: 현재 MAX_REACH_M 와 로봇 위치 기준.
+        #      둘 중 하나가 바뀐 경우에만 다시 그린다 (변화가 없으면 아무것도 하지 않음) ----
         if reach_viz is not None:
             try:
                 reach_viz.update_boundary(get_robot_base_pose(scene), MAX_REACH_M)
             except Exception as e:  # noqa: BLE001
                 log(f"Reach visualization error ({e}); disabling it, sensing continues.", "WARN")
                 reach_viz = None
+        # 패널의 REACH VISUALIZATION 구역 갱신
         if ui_panel is not None:
             try:
                 if reach_viz is None:
